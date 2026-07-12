@@ -73,21 +73,21 @@ mini-gh-tracker/
 ├── certs/generate_certs.sh
 ├── docker/Dockerfile
 ├── include/
-│   ├── corestack/secure_session.h   [SWAP POINT #1]
-│   ├── corestack/htttp.h            [SWAP POINT #2]
+│   ├── corestack/secure_session.h
+│   ├── corestack/htttp.h
 │   ├── db.h, models.h, router.h, template.h, handlers.h, form_util.h
 ├── src/
 │   ├── main.c
-│   ├── corestack/secure_session.c   [SWAP POINT #1]
-│   ├── corestack/htttp.c            [SWAP POINT #2]
+│   ├── corestack/secure_session.c
+│   ├── corestack/htttp.c
 │   ├── db.c, router.c, template.c, form_util.c
 │   └── handlers/
-│       ├── project_handlers.c   (UC1, UC2)
-│       ├── issue_handlers.c     (UC3, UC4, UC8, UC9, UC10, UC11)
-│       ├── comment_handlers.c   (UC5)
-│       ├── label_handlers.c     (UC6, UC7 -- fixed catalog, multi-assign)
-│       ├── user_handlers.c      (Tier 2: assignees)
-│       └── time_handlers.c      (Tier 2: time tracking)
+│       ├── project_handlers.c
+│       ├── issue_handlers.c
+│       ├── comment_handlers.c
+│       ├── label_handlers.c
+│       ├── user_handlers.c
+│       └── time_handlers.c
 ```
 
 `form_util.c` is a small standalone helper that parses repeated form keys, e.g. several checked `label_id` checkboxes in one submit -- `htttp_form_get()` only ever returns the first match for a key, which is enough for single text fields but not multi-select.
