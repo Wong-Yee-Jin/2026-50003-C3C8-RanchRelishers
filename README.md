@@ -26,10 +26,10 @@ Browser
 main.c ── accept() loop, forks per connection
    │
    ▼
-corestack/secure_session.c   [SWAP POINT #1]  handshake + encrypted I/O
+corestack/secure_session.c    handshake + encrypted I/O
    │
    ▼
-corestack/htttp.c            [SWAP POINT #2]  HTTP parse/serialize
+corestack/htttp.c             HTTP parse/serialize
    │
    ▼
 router.c                      method+path -> handler dispatch
