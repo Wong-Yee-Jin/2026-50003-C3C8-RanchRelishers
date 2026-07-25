@@ -11,6 +11,8 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Strips leading blanks and any trailing whitespace fgets() left on the line
+   (the newline, and a trailing \r if input ever comes from a CRLF source). */
 char *ui_trim(char *s) {
     char *start = s;
     while (*start == ' ' || *start == '\t') start++;
@@ -28,6 +30,8 @@ char *ui_trim(char *s) {
     return s;
 }
 
+/* -1 means "not a selectable choice" rather than 0, so a blank line or a
+   typo can't be mistaken for the user deliberately picking item 0 (back/quit). */
 int ui_parse_choice(const char *line) {
     if (!line || line[0] == '\0') return -1;
     char *end;
@@ -81,6 +85,9 @@ static void screen_header(const char *title) {
     }
 }
 
+/* Renders one issue in full: header line, description, then labels,
+   assignees and comments resolved from the ids stored on the issue into
+   names a person reads on screen. */
 static void print_issue(const issue_t *is) {
     printf("\n#%d %s [%s]\n", is->issue_number, is->title,
            is->status == STATUS_OPEN ? "open" : "closed");
@@ -123,6 +130,9 @@ static void print_issue(const issue_t *is) {
     free(comments);
 }
 
+/* Action screen for a single issue. Re-fetches the issue at the top of every
+   loop pass instead of holding onto the struct across an edit, so a status
+   toggle or a new comment shows up on the very next redraw. */
 static void screen_issue_detail(const char *issue_id) {
     char line[COMMENT_LEN];
     for (;;) {
@@ -187,6 +197,10 @@ static void screen_issue_detail(const char *issue_id) {
     }
 }
 
+/* Issue list for one project, with create/search/filter and drill-down into
+   a single issue. issue_service_list hands back a heap array each pass, so
+   every branch below frees it before it returns or recurses, the unknown
+   choice branch included, or the array would leak on every mistyped line. */
 static void screen_issues(const char *project_id, const char *project_name) {
     char line[DESC_LEN];
     for (;;) {
@@ -205,13 +219,13 @@ static void screen_issues(const char *project_id, const char *project_name) {
 
         if (line[0] == 'c' || line[0] == 'C') {
             free(issues);
-            char title[TITLE_LEN], desc[DESC_LEN];
+            char new_title[TITLE_LEN], desc[DESC_LEN];
             printf("title: ");
-            if (!read_line(title, sizeof(title))) return;
+            if (!read_line(new_title, sizeof(new_title))) return;
             printf("description: ");
             if (!read_line(desc, sizeof(desc))) return;
             issue_t created;
-            print_result(issue_service_create(project_id, title, desc, &created), "title cannot be blank");
+            print_result(issue_service_create(project_id, new_title, desc, &created), "title cannot be blank");
 
         } else if (line[0] == 's' || line[0] == 'S') {
             free(issues);
@@ -258,6 +272,8 @@ static void screen_issues(const char *project_id, const char *project_name) {
                 free(issues);
                 screen_issue_detail(id);
             } else {
+                // a bad selection still has to release the list fetched
+                // above before the loop goes around and fetches it again
                 printf("unknown choice\n");
                 free(issues);
             }
@@ -265,6 +281,9 @@ static void screen_issues(const char *project_id, const char *project_name) {
     }
 }
 
+/* Top-level project list and create screen. Same discipline as the issues
+   screen: the project array is freed on every branch, including a stray
+   keypress that matches nothing, since it's about to be re-listed anyway. */
 static void screen_projects(void) {
     char line[NAME_LEN];
     for (;;) {
@@ -294,6 +313,8 @@ static void screen_projects(void) {
                 free(projects);
                 screen_issues(id, name);
             } else {
+                // unrecognized input still exits this pass of the loop, so
+                // the list has to go before control gets back to the top
                 printf("unknown choice\n");
                 free(projects);
             }
@@ -301,6 +322,9 @@ static void screen_projects(void) {
     }
 }
 
+/* Label list and create screen. Labels have no drill-down screen of their
+   own, so the list is freed right after it's printed instead of carrying it
+   through the branches below like screen_issues and screen_projects do. */
 static void screen_labels(void) {
     char line[NAME_LEN];
     for (;;) {
@@ -381,6 +405,10 @@ static void github_resume_session(void) {
     auth_ctx_set_user("local");
 }
 
+/* Runs the device flow end to end: request a code, show it to the user to
+   enter on github.com, then poll until they approve it, deny it, or the code
+   expires. Blocks the whole menu while it waits, which is fine since there is
+   nothing else useful to do until the user has typed the code in anyway. */
 static void github_login(void) {
     gh_device_t dev;
     gh_status_t status = github_device_start(&dev);
@@ -433,6 +461,8 @@ static void github_login(void) {
     printf("timed out waiting for authorization, try again\n");
 }
 
+/* Drops the saved token and hands the session back to the same local
+   identity that startup uses when there was never a token to begin with. */
 static void github_logout(void) {
     token_clear();
     auth_ctx_set_user("local");   // back to the local identity, still usable offline
@@ -440,6 +470,9 @@ static void github_logout(void) {
     printf("Logged out of GitHub\n");
 }
 
+/* Lists the signed-in user's repos straight from the GitHub API. Needs a
+   saved token, so a local-only session is told to log in first rather than
+   sent to GitHub with nothing to authenticate the request. */
 static void github_repos(void) {
     char token[256];
     if (!token_load(token, sizeof(token))) {
@@ -453,6 +486,9 @@ static void github_repos(void) {
     else for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
 }
 
+/* Boots the session: nudge the terminal to a usable size, play the splash,
+   resume whatever GitHub identity (if any) was saved from last time, then
+   loop the main menu until the user quits or stdin runs out. */
 void menu_run(void) {
     render_request_size();
     render_splash();
