@@ -4,7 +4,7 @@ LDFLAGS  := -lsqlite3
 
 # Application sources. corestack/router/template/form_util/oauth are removed in M3;
 # until then keep this list pointing only at what actually compiles in the new tree.
-SRC := src/main.c src/util.c src/db.c \
+SRC := src/main.c src/util.c src/db.c src/json.c \
        $(wildcard src/core/*.c) $(wildcard src/ui/*.c)
 OBJ := $(SRC:.c=.o)
 BIN := mini-gh-tracker
@@ -22,7 +22,7 @@ $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Test binaries link everything except main.o so a test can drive the library directly.
-build/%: tests/%.c src/util.c src/db.c $(wildcard src/core/*.c) $(wildcard src/ui/*.c)
+build/%: tests/%.c src/util.c src/db.c src/json.c $(wildcard src/core/*.c) $(wildcard src/ui/*.c)
 	@mkdir -p build
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
