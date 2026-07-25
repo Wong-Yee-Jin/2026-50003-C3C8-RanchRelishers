@@ -41,11 +41,6 @@ static bool read_line(char *buf, size_t n) {
     return true;
 }
 
-/* Labels and assignees screens land in the next commit; this menu loop
-   already needs somewhere to dispatch to. */
-static void screen_labels(void)   { printf("labels screen coming soon\n"); }
-static void screen_assignees(void){ printf("assignees screen coming soon\n"); }
-
 /* Every action funnels its svc_result_t through here so the wording for
    "not signed in" / "not found" / "database error" is written once. Callers
    only supply the text for SVC_INVALID, since that is the one code whose
@@ -273,6 +268,52 @@ static void screen_projects(void) {
             }
         }
     }
+}
+
+static void screen_labels(void) {
+    char line[NAME_LEN];
+    for (;;) {
+        label_t *labels = NULL;
+        int n = label_service_list(&labels);
+        printf("\n-- Labels --\n");
+        if (n == 0) printf("(no labels yet)\n");
+        for (int i = 0; i < n; i++) {
+            printf("  %d) %s", i + 1, labels[i].name);
+            if (labels[i].description[0]) printf(" - %s", labels[i].description);
+            printf("\n");
+        }
+        free(labels);
+        printf("  c) create   0) back\n> ");
+        if (!read_line(line, sizeof(line))) return;
+
+        if (line[0] == 'c' || line[0] == 'C') {
+            char name[NAME_LEN], desc[LABEL_DESC_LEN];
+            printf("label name: ");
+            if (!read_line(name, sizeof(name))) return;
+            printf("description: ");
+            if (!read_line(desc, sizeof(desc))) return;
+            label_t created;
+            print_result(label_service_create(name, desc, &created), "blank or duplicate label name");
+        } else if (ui_parse_choice(line) == 0) {
+            return;
+        } else {
+            printf("unknown choice\n");
+        }
+    }
+}
+
+/* Users only ever get in through GitHub login (M4), so this screen is
+   read-only for now, there is no user_service_create to call. */
+static void screen_assignees(void) {
+    user_t *users = NULL;
+    int n = user_service_list(&users);
+    printf("\n-- Assignees --\n");
+    if (n == 0) printf("(no users yet)\n");
+    for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
+    free(users);
+    printf("0) back\n> ");
+    char line[16];
+    read_line(line, sizeof(line));
 }
 
 void menu_run(void) {
