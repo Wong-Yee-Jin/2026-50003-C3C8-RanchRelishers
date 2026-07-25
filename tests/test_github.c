@@ -12,5 +12,13 @@ int main(void) {
     CHECK(github_parse_token_response("{\"error\":\"slow_down\"}", tok, sizeof(tok)) == GH_SLOW_DOWN);
     CHECK(github_parse_token_response("{\"error\":\"expired_token\"}", tok, sizeof(tok)) == GH_EXPIRED);
     CHECK(github_parse_token_response("{\"error\":\"access_denied\"}", tok, sizeof(tok)) == GH_DENIED);
+
+    const char *repos = "[{\"name\":\"alpha\",\"private\":false},{\"name\":\"beta-svc\",\"private\":true}]";
+    char names[10][128];
+    int n = github_parse_repo_names(repos, names, 10);
+    CHECK(n == 2);
+    CHECK_STR(names[0], "alpha");
+    CHECK_STR(names[1], "beta-svc");
+
     return TEST_SUMMARY();
 }

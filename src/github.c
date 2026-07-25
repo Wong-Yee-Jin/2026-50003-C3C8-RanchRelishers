@@ -1,5 +1,6 @@
 #include "github.h"
 #include "json.h"
+#include "db.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,11 +61,9 @@ static bool http_post_form(const char *url, const char *body, char *out, size_t 
     return true;
 }
 
-/* GET with a bearer token, for the authenticated GitHub API. Kept alongside
-   the device-flow POST because the repo listing built on top of this module
-   needs it; the device flow itself never calls it, so it reads as unused until
-   that milestone wires it up. */
-static bool __attribute__((unused))
+/* GET with a bearer token, for the authenticated GitHub API. The device flow
+   never calls this; it backs the user and repo fetches below. */
+static bool
 http_get_bearer(const char *url, const char *token, char *out, size_t outlen) {
     if (outlen == 0) return false;
     CURL *curl = curl_easy_init();
@@ -132,4 +131,45 @@ gh_status_t github_device_poll(const char *device_code, char *token_out, size_t 
     if (!http_post_form("https://github.com/login/oauth/access_token", body, resp, sizeof(resp)))
         return GH_ERROR;
     return github_parse_token_response(resp, token_out, outlen);
+}
+
+bool github_fetch_and_upsert_user(const char *token, user_t *out) {
+    char resp[4096];
+    if (!http_get_bearer("https://api.github.com/user", token, resp, sizeof(resp)))
+        return false;
+
+    long long id = json_field_int(resp, "id", 0);
+    char login[USERNAME_LEN];
+    if (id == 0 || !json_field(resp, "login", login, sizeof(login)))
+        return false;
+
+    /* GitHub allows a null name, and json_field copies the literal text for a
+       non-string value, so a null shows up as the string "null" here. Either
+       way, fall back to the login as the display name. */
+    char name[DISPLAY_NAME_LEN];
+    if (!json_field(resp, "name", name, sizeof(name)) || strcmp(name, "null") == 0)
+        snprintf(name, sizeof(name), "%s", login);
+
+    char avatar[AVATAR_URL_LEN];
+    if (!json_field(resp, "avatar_url", avatar, sizeof(avatar)))
+        avatar[0] = '\0';
+
+    return db_user_upsert_github(id, login, name, avatar, out);
+}
+
+int github_parse_repo_names(const char *body, char names[][128], int max) {
+    return json_array_objects(body, "name", names, max);
+}
+
+int github_list_repos(const char *token, char names[][128], int max) {
+    /* A page of 100 full repo objects can run past a few hundred KB, too big
+       for a comfortable stack buffer, so this one is heap allocated. */
+    size_t cap = 262144;
+    char *resp = malloc(cap);
+    if (!resp) return -1;
+    bool ok = http_get_bearer("https://api.github.com/user/repos?per_page=100&sort=updated",
+                              token, resp, cap);
+    int n = ok ? github_parse_repo_names(resp, names, max) : -1;
+    free(resp);
+    return n;
 }

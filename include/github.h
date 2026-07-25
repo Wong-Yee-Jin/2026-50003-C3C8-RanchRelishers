@@ -2,6 +2,7 @@
 #define GITHUB_H
 #include <stdbool.h>
 #include <stddef.h>
+#include "models.h"
 
 /* Drives GitHub's OAuth device flow over HTTPS with libcurl. The device flow
    suits a terminal app because it has no redirect URL to catch: we ask GitHub
@@ -39,5 +40,22 @@ gh_status_t github_device_start(gh_device_t *out);
    status, so the caller loops on GH_PENDING/GH_SLOW_DOWN until GH_OK or a
    terminal error. */
 gh_status_t github_device_poll(const char *device_code, char *token_out, size_t outlen);
+
+/* GET /user with the bearer token and upsert the result into SQLite via
+   db_user_upsert_github. Reads id, login, name, and avatar_url from the
+   response. GitHub allows a null name, so a missing or null name falls back
+   to the login for the display name. Returns false on an HTTP failure, a
+   missing id or login, or a failed upsert. */
+bool github_fetch_and_upsert_user(const char *token, user_t *out);
+
+/* Pull the name field out of each object in a top-level JSON array, such as
+   the body of GET /user/repos. Pure and network-free so it is unit tested
+   against a captured response. Returns how many names were copied. */
+int github_parse_repo_names(const char *body, char names[][128], int max);
+
+/* GET /user/repos with the bearer token and parse the repo names out of the
+   response. Returns -1 on an HTTP failure so the caller can tell a failed
+   request apart from an account with zero repos. */
+int github_list_repos(const char *token, char names[][128], int max);
 
 #endif
