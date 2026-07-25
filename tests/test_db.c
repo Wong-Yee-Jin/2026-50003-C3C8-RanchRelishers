@@ -33,6 +33,16 @@ int main(void) {
     CHECK_STR(lf.description, "defect");
     label_t *ll = NULL; int ln = db_label_list(&ll); CHECK(ln == 1); free(ll);
 
+    user_t u1;
+    CHECK(db_user_upsert_github(42, "octocat", "The Octocat", "http://a/x.png", &u1) == true);
+    user_t u2;
+    CHECK(db_user_upsert_github(42, "octocat2", "Octo Two", "http://a/y.png", &u2) == true);
+    CHECK_STR(u1.id, u2.id);                 // same github_id maps to the same row
+    CHECK_STR(u2.username, "octocat2");      // fields updated in place
+    user_t uf; CHECK(db_user_find_by_github_id(42, &uf) == true);
+    CHECK(uf.github_id == 42);
+    user_t *ul = NULL; int un = db_user_list(&ul); CHECK(un == 1); free(ul);
+
     db_shutdown();
     return TEST_SUMMARY();
 }

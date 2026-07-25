@@ -206,3 +206,128 @@ void db_labels_seed(void) {
     db_label_create("feature", "", &tmp);
     db_label_create("question", "", &tmp);
 }
+
+/* ---- Users / Assignees ---- */
+
+/* The three text columns are nullable for locally created users, so read them
+   defensively before copying into the fixed buffers. */
+static void user_read_row(sqlite3_stmt *st, user_t *out) {
+    memset(out, 0, sizeof(*out));
+    snprintf(out->id, sizeof(out->id), "%s", sqlite3_column_text(st, 0));
+    const unsigned char *un = sqlite3_column_text(st, 1);
+    const unsigned char *dn = sqlite3_column_text(st, 2);
+    const unsigned char *av = sqlite3_column_text(st, 3);
+    snprintf(out->username, sizeof(out->username), "%s", un ? (const char *)un : "");
+    snprintf(out->display_name, sizeof(out->display_name), "%s", dn ? (const char *)dn : "");
+    snprintf(out->avatar_url, sizeof(out->avatar_url), "%s", av ? (const char *)av : "");
+    out->github_id = sqlite3_column_int64(st, 4);
+}
+
+bool db_user_name_exists(const char *username) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT 1 FROM users WHERE username=?", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, username, -1, SQLITE_STATIC);
+    bool exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return exists;
+}
+
+bool db_user_create(const char *username, user_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!id_generate(out->id)) return false;
+    snprintf(out->username, sizeof(out->username), "%s", username);
+
+    sqlite3_stmt *st;
+    const char *sql = "INSERT INTO users(id, username, display_name, avatar_url, github_id)"
+                      " VALUES(?, ?, NULL, NULL, NULL)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, out->id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, out->username, -1, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool db_user_find_by_id(const char *id, user_t *out) {
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, username, display_name, avatar_url, github_id FROM users WHERE id=?",
+            -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) { user_read_row(st, out); found = true; }
+    sqlite3_finalize(st);
+    return found;
+}
+
+bool db_user_find_by_github_id(long long github_id, user_t *out) {
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, username, display_name, avatar_url, github_id FROM users WHERE github_id=?",
+            -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int64(st, 1, github_id);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) { user_read_row(st, out); found = true; }
+    sqlite3_finalize(st);
+    return found;
+}
+
+int db_user_list(user_t **out_list) {
+    *out_list = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, username, display_name, avatar_url, github_id FROM users ORDER BY username",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    int cap = 0, n = 0;
+    user_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            user_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;
+        }
+        user_read_row(st, &arr[n]);
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}
+
+bool db_user_upsert_github(long long github_id, const char *username,
+                           const char *display_name, const char *avatar_url, user_t *out) {
+    user_t existing;
+    if (db_user_find_by_github_id(github_id, &existing)) {
+        sqlite3_stmt *st;
+        const char *sql = "UPDATE users SET username=?, display_name=?, avatar_url=? WHERE github_id=?";
+        if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+        sqlite3_bind_text(st, 1, username, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, display_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, avatar_url, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 4, github_id);
+        bool ok = sqlite3_step(st) == SQLITE_DONE;
+        sqlite3_finalize(st);
+        if (!ok) return false;
+        return db_user_find_by_github_id(github_id, out);
+    }
+
+    char id[ID_LEN];
+    if (!id_generate(id)) return false;
+    sqlite3_stmt *st;
+    const char *sql = "INSERT INTO users(id, username, display_name, avatar_url, github_id)"
+                      " VALUES(?, ?, ?, ?, ?)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, username, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, display_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, avatar_url, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 5, github_id);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    if (!ok) return false;
+    return db_user_find_by_github_id(github_id, out);
+}
