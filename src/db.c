@@ -366,7 +366,8 @@ bool db_issue_create(const char *project_id, const char *title,
     if (!id_generate(out->id)) return false;
     snprintf(out->project_id, sizeof(out->project_id), "%s", project_id);
     out->issue_number = number;
-    snprintf(out->title, sizeof(out->title), "%s", title);
+    // title is external-derived and may be NULL, same as description below
+    snprintf(out->title, sizeof(out->title), "%s", title ? title : "");
     snprintf(out->description, sizeof(out->description), "%s", description ? description : "");
     out->status = STATUS_OPEN;
     out->label_count = 0;
@@ -485,6 +486,7 @@ static void like_escape(const char *in, char *out, size_t outlen) {
 
 int db_issue_search(const char *keyword, int limit, issue_t **out_list) {
     *out_list = NULL;
+    if (!keyword) keyword = "";   // caller input crosses a trust boundary here and may be NULL
     char esc[256], pattern[300];
     like_escape(keyword, esc, sizeof(esc));
     snprintf(pattern, sizeof(pattern), "%%%s%%", esc);   // %keyword%

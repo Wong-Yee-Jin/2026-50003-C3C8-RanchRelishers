@@ -87,6 +87,15 @@ int main(void) {
     CHECK_STR(cl[0].text, "first note");   // ordered by created_at ascending
     free(cl);
 
+    issue_t *sg = NULL;
+    int sgn = db_issue_search(NULL, 50, &sg);   // NULL keyword must not crash, matches all rows
+    CHECK(sgn >= 0);
+    free(sg);
+
+    issue_t io;
+    CHECK(db_issue_create(p.id, NULL, "d", &io) == true);   // NULL title must not crash
+    CHECK_STR(io.title, "");
+
     db_shutdown();
     return TEST_SUMMARY();
 }
