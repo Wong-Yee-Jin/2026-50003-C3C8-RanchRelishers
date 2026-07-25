@@ -38,5 +38,24 @@ int main(void) {
     CHECK(json_field(nested, "top_key", buf, sizeof(buf)) == true);
     CHECK_STR(buf, "visible");
 
+    /* Malformed input must fail cleanly: no crash, no hang, no OOB read. */
+    CHECK(json_field("{\"a\":\"b", "a", buf, sizeof(buf)) == false);
+    CHECK(json_field("{\"a\":\"\\u12\"}", "a", buf, sizeof(buf)) == false);
+
+    /* json_array_objects stops at max even when more elements are present. */
+    const char *repos_capped = "[{\"name\":\"a\"},{\"name\":\"b\"},{\"name\":\"c\"}]";
+    char names_capped[8][128];
+    int n_capped = json_array_objects(repos_capped, "name", names_capped, 2);
+    CHECK(n_capped == 2);
+    CHECK_STR(names_capped[0], "a");
+    CHECK_STR(names_capped[1], "b");
+
+    /* A quoted empty string is a valid value distinct from a missing one. */
+    CHECK(json_field("{\"a\":\"\"}", "a", buf, sizeof(buf)) == true);
+    CHECK_STR(buf, "");
+
+    /* A bare zero-length token (no value between ':' and ',') is malformed. */
+    CHECK(json_field("{\"a\":,\"b\":1}", "a", buf, sizeof(buf)) == false);
+
     return TEST_SUMMARY();
 }

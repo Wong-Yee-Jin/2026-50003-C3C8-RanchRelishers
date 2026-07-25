@@ -6,9 +6,9 @@
 /* A small self-contained JSON scanner for the responses GitHub returns. The
    old code matched fields with strstr, which the migration audit flagged as
    fragile because a key inside a nested object or a string value could be
-   mistaken for the real thing. These functions tokenize the input for real:
-   they skip whitespace, honor backslash escapes inside strings, and track
-   object and array nesting so only the level being asked about is searched. */
+   mistaken for the real thing. These functions tokenize the input for real,
+   honoring backslash escapes inside strings. Object and array nesting is
+   tracked so only the level being asked about is searched. */
 
 /* Copy the top-level value for key into out and return true. For a string the
    contents are unescaped; for a number, boolean, or null the literal text is

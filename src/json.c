@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Step over the whitespace JSON allows between tokens and return the first
+   character that carries meaning. */
 static const char *skip_ws(const char *p) {
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     return p;
@@ -44,10 +46,11 @@ static const char *copy_string(const char *p, char *out, size_t outlen) {
                 case 'b': c = '\b'; break;
                 case 'f': c = '\f'; break;
                 case 'u': {
-                    /* ponytail: ASCII-only \u handling. The GitHub login and
-                       repo fields we read carry no \u escapes; decode to a byte
-                       when the codepoint fits, else '?'. Widen to full UTF-8 if
-                       a field that can hold non-ASCII ever needs to round-trip. */
+                    /* Decode a \u escape down to a single byte. The GitHub login
+                       and repo fields we read are ASCII in practice, so a
+                       codepoint that fits becomes that byte and one that will not
+                       fit becomes '?'. Widen to full UTF-8 only if some field
+                       that can hold non-ASCII ever needs to round-trip. */
                     int v = 0;
                     for (int k = 1; k <= 4; k++) {
                         char h = p[k];
@@ -123,7 +126,10 @@ static bool object_field(const char *p, const char *key, char *out, size_t outle
         if (strcmp(name, key) == 0) {
             if (*p == '"') return copy_string(p, out, outlen) != NULL;
             const char *end = skip_value(p);
-            if (!end) return false;
+            if (!end || end == p) return false;
+            /* A non-string value (number, bool, null) is copied as its literal
+               text, but clipped to leave room for the terminating NUL so a long
+               value can never run past out. */
             size_t n = (size_t)(end - p);
             if (n + 1 > outlen) n = outlen ? outlen - 1 : 0;
             memcpy(out, p, n);
@@ -138,11 +144,15 @@ static bool object_field(const char *p, const char *key, char *out, size_t outle
     }
 }
 
+/* Public entry point. Reject null or zero-length arguments up front, then hand
+   off to the object scanner for the real work. */
 bool json_field(const char *body, const char *key, char *out, size_t outlen) {
     if (!body || !key || !out || outlen == 0) return false;
     return object_field(body, key, out, outlen);
 }
 
+/* Read a field as a long, falling back to dflt when it is absent or does not
+   parse. The endp check catches a field that is empty or starts non-numeric. */
 long json_field_int(const char *body, const char *key, long dflt) {
     char buf[64];
     if (!json_field(body, key, buf, sizeof(buf))) return dflt;
@@ -152,6 +162,9 @@ long json_field_int(const char *body, const char *key, long dflt) {
     return v;
 }
 
+/* Walk a top-level array and copy one field from each object element into the
+   next out row. A non-object element or one missing the field is skipped rather
+   than treated as an error, so one odd entry does not abort the whole scan. */
 int json_array_objects(const char *body, const char *field, char out[][128], int max) {
     if (!body || !field || !out || max <= 0) return 0;
     const char *p = skip_ws(body);
