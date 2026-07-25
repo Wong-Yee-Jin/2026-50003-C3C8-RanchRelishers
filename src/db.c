@@ -471,6 +471,97 @@ bool db_issue_assign_label(const char *issue_id, const char *label_id) {
     return ok;
 }
 
+/* Escape %, _ and the escape char itself so a keyword is matched literally.
+   Without this a user typing % would match every row, which was the injection
+   the audit flagged in the old Mongo regex path. */
+static void like_escape(const char *in, char *out, size_t outlen) {
+    size_t j = 0;
+    for (size_t i = 0; in[i] && j + 2 < outlen; i++) {
+        if (in[i] == '%' || in[i] == '_' || in[i] == '\\') out[j++] = '\\';
+        out[j++] = in[i];
+    }
+    out[j] = '\0';
+}
+
+int db_issue_search(const char *keyword, int limit, issue_t **out_list) {
+    *out_list = NULL;
+    char esc[256], pattern[300];
+    like_escape(keyword, esc, sizeof(esc));
+    snprintf(pattern, sizeof(pattern), "%%%s%%", esc);   // %keyword%
+    sqlite3_stmt *st;
+    const char *sql =
+        "SELECT id, project_id, issue_number, title, description, status "
+        "FROM issues WHERE title LIKE ? ESCAPE '\\' "
+        "OR description LIKE ? ESCAPE '\\' ORDER BY issue_number LIMIT ?";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, pattern, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, pattern, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 3, limit);
+    int cap = 0, n = 0;
+    issue_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;
+        }
+        issue_read_scalar(st, &arr[n]);
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}
+
+int db_issue_filter(const char *status_filter, const char *label_id_filter,
+                    int limit, issue_t **out_list) {
+    *out_list = NULL;
+    bool has_status = status_filter != NULL;
+    bool has_label = label_id_filter != NULL;
+    int status_val = STATUS_OPEN;
+    if (has_status) status_val = (strcmp(status_filter, "closed") == 0) ? STATUS_CLOSED : STATUS_OPEN;
+
+    /* Only fixed clause fragments are chosen in C. Every user value is bound,
+       so no keyword or id reaches the SQL text. */
+    char sql[512];
+    if (has_label) {
+        snprintf(sql, sizeof(sql),
+            "SELECT i.id, i.project_id, i.issue_number, i.title, i.description, i.status "
+            "FROM issues i JOIN issue_labels il ON il.issue_id = i.id "
+            "WHERE il.label_id = ?%s ORDER BY i.issue_number LIMIT ?",
+            has_status ? " AND i.status = ?" : "");
+    } else {
+        snprintf(sql, sizeof(sql),
+            "SELECT id, project_id, issue_number, title, description, status "
+            "FROM issues%s ORDER BY issue_number LIMIT ?",
+            has_status ? " WHERE status = ?" : "");
+    }
+
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    int idx = 1;
+    if (has_label) sqlite3_bind_text(st, idx++, label_id_filter, -1, SQLITE_STATIC);
+    if (has_status) sqlite3_bind_int(st, idx++, status_val);
+    sqlite3_bind_int(st, idx++, limit);
+
+    int cap = 0, n = 0;
+    issue_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;
+        }
+        issue_read_scalar(st, &arr[n]);
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}
+
 bool db_issue_assign_user(const char *issue_id, const char *user_id) {
     sqlite3_stmt *st;
     const char *sql = "INSERT OR IGNORE INTO issue_assignees(issue_id, user_id) VALUES(?, ?)";

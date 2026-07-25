@@ -68,6 +68,18 @@ int main(void) {
     issue_t *il = NULL; int in = db_issue_list_by_project(p.id, &il);
     CHECK(in == 2); free(il);
 
+    // i1 title "Login broken", i2 title "Second" from Task 1.6
+    issue_t *s = NULL;
+    int sn = db_issue_search("login", 50, &s);      // case-insensitive substring
+    CHECK(sn == 1); free(s);
+
+    int sn2 = db_issue_search("%", 50, &s);          // literal percent, not a match-all
+    CHECK(sn2 == 0); free(s);                         // proves % is escaped, not a wildcard
+
+    issue_t *f = NULL;
+    int fn = db_issue_filter("open", NULL, 50, &f);   // i2 is open, i1 was closed
+    CHECK(fn == 1); free(f);
+
     db_shutdown();
     return TEST_SUMMARY();
 }
