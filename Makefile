@@ -22,7 +22,7 @@ $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Test binaries link everything except main.o so a test can drive the library directly.
-build/%: tests/%.c src/util.c src/db.c $(wildcard src/core/*.c)
+build/%: tests/%.c src/util.c src/db.c $(wildcard src/core/*.c) $(wildcard src/ui/*.c)
 	@mkdir -p build
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
