@@ -70,3 +70,53 @@ bool db_project_create(const char *name, project_t *out) {
     sqlite3_finalize(st);
     return ok;
 }
+
+bool db_project_name_exists(const char *name) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT 1 FROM projects WHERE name=?", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+    bool exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return exists;
+}
+
+bool db_project_find_by_id(const char *id, project_t *out) {
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT id, name FROM projects WHERE id=?", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        snprintf(out->id, sizeof(out->id), "%s", sqlite3_column_text(st, 0));
+        snprintf(out->name, sizeof(out->name), "%s", sqlite3_column_text(st, 1));
+        found = true;
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
+int db_project_list(project_t **out_list) {
+    *out_list = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT id, name FROM projects ORDER BY name",
+                           -1, &st, NULL) != SQLITE_OK) return 0;
+    int cap = 0, n = 0;
+    project_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            project_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;   // assign only after realloc succeeds, per the audit
+        }
+        memset(&arr[n], 0, sizeof(arr[n]));
+        snprintf(arr[n].id, sizeof(arr[n].id), "%s", sqlite3_column_text(st, 0));
+        snprintf(arr[n].name, sizeof(arr[n].name), "%s", sqlite3_column_text(st, 1));
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}
