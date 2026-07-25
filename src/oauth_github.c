@@ -180,7 +180,10 @@ static bool split_http_response(char *raw, int *status_out, char **body_out) {
     *body_out = marker + 4;
 
     if (strcasestr(raw, "\r\nTransfer-Encoding: chunked\r\n") != NULL) {
-        static char dechunked[32768];
+        /* Sized generously enough for a page of /user/repos JSON (up to
+         * 100 repos), not just the small profile/token responses this
+         * was originally written for. */
+        static char dechunked[262144];
         char *src = *body_out;
         size_t out_len = 0;
         while (*src) {
@@ -201,6 +204,47 @@ static bool split_http_response(char *raw, int *status_out, char **body_out) {
     return true;
 }
 
+/* Scans `json` for every top-level occurrence of "<key>":"<value>" and
+ * copies each decoded value into consecutive `stride`-byte slots
+ * starting at `out`, stopping at `max`. This is a flat scan (no real
+ * JSON parsing), which is good enough for an array of similarly-shaped
+ * objects -- like one "full_name" per repo, or one "login" per user --
+ * where the key appears exactly once per item in document order. */
+static int extract_all_strings(const char *json, const char *key, char *out, int stride, int max) {
+    char needle[80];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+
+    const char *p = json;
+    int n = 0;
+    while (n < max) {
+        const char *hit = strstr(p, needle);
+        if (!hit) break;
+        p = hit + strlen(needle);
+
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != ':') continue;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '"') continue;
+        p++;
+
+        char *dst = out + (size_t)n * stride;
+        int j = 0;
+        while (*p && *p != '"' && j < stride - 1) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                dst[j++] = (*p == 'n') ? '\n' : (*p == 't') ? '\t' : *p;
+            } else {
+                dst[j++] = *p;
+            }
+            p++;
+        }
+        dst[j] = '\0';
+        n++;
+    }
+    return n;
+}
+
 /* ---------------------------------------------------------------------
  * public API
  * --------------------------------------------------------------------- */
@@ -217,9 +261,15 @@ bool oauth_github_authorize_url(const char *state, char *out, int outlen) {
     url_encode(redirect_uri, enc_redirect, sizeof(enc_redirect));
     url_encode(state, enc_state, sizeof(enc_state));
 
+    /* "repo" is required (in addition to "read:user") so that
+     * /user/repos returns the account's *private* repos too, not just
+     * public ones -- otherwise GitHub silently filters private repos
+     * out of the listing regardless of affiliation. See
+     * oauth_github_fetch_repos() below and the per-login import in
+     * auth_handlers.c, which rely on seeing both. */
     snprintf(out, outlen,
              "https://github.com/login/oauth/authorize"
-             "?client_id=%s&redirect_uri=%s&scope=read:user&state=%s",
+             "?client_id=%s&redirect_uri=%s&scope=read:user%%20repo&state=%s",
              client_id, enc_redirect, enc_state);
     return true;
 }
@@ -303,4 +353,120 @@ bool oauth_github_fetch_user(const char *access_token, gh_user_t *out) {
 
     free(raw);
     return ok;
+}
+
+/* Same validation GitHub itself does when a repo owner types a username
+ * into the "add collaborator" box: the login has to actually exist on
+ * GitHub. GET /users/:username is public and needs no token -- a 200
+ * means the account is real, a 404 (or anything else) means it isn't. */
+bool oauth_github_username_exists(const char *username) {
+    if (!username || !username[0]) return false;
+
+    /* Cheap local check first (GitHub's own login rules: alphanumeric
+     * and single hyphens, no leading/trailing/double hyphen, <= 39
+     * chars) so obviously-bogus input doesn't cost a network round trip. */
+    size_t len = strlen(username);
+    if (len > 39) return false;
+    if (username[0] == '-' || username[len - 1] == '-') return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)username[i];
+        if (!isalnum(c) && c != '-') return false;
+        if (c == '-' && i + 1 < len && username[i + 1] == '-') return false;
+    }
+
+    char path[80];
+    snprintf(path, sizeof(path), "/users/%s", username);
+
+    char request[512];
+    snprintf(request, sizeof(request),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Accept: application/vnd.github+json\r\n"
+        "User-Agent: mini-gh-tracker\r\n"
+        "Connection: close\r\n\r\n",
+        path, GH_API_HOST);
+
+    char *raw = https_roundtrip(GH_API_HOST, request);
+    if (!raw) return false; /* Alternative Flow: couldn't reach GitHub to verify */
+
+    int status = 0;
+    char *json = NULL;
+    bool ok = split_http_response(raw, &status, &json) && status == 200;
+    free(raw);
+    return ok;
+}
+
+/* Lists the repos the authenticated user (owning `access_token`) is an
+ * owner of or a collaborator/contributor on -- both public and private,
+ * since the "repo" OAuth scope is requested above -- as "owner/repo"
+ * full names. Used to auto-add any projects missing from this app on
+ * every login (see auth_handlers.c). Only one page (up to 100 repos)
+ * is fetched; that's plenty for this app's purposes. */
+int oauth_github_fetch_repos(const char *access_token, char out[][GH_REPO_FULLNAME_LEN], int max) {
+    if (!access_token || !access_token[0] || max <= 0) return -1;
+
+    char request[512];
+    snprintf(request, sizeof(request),
+        "GET /user/repos?affiliation=owner,collaborator&per_page=100&sort=full_name HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Authorization: Bearer %s\r\n"
+        "Accept: application/vnd.github+json\r\n"
+        "User-Agent: mini-gh-tracker\r\n"
+        "Connection: close\r\n\r\n",
+        GH_API_HOST, access_token);
+
+    char *raw = https_roundtrip(GH_API_HOST, request);
+    if (!raw) return -1;
+
+    int status = 0;
+    char *json = NULL;
+    if (!split_http_response(raw, &status, &json) || status != 200) {
+        fprintf(stderr, "[oauth] fetching repo list failed (http %d)\n", status);
+        free(raw);
+        return -1;
+    }
+
+    int n = extract_all_strings(json, "full_name", (char *)out, GH_REPO_FULLNAME_LEN, max);
+    free(raw);
+    return n;
+}
+
+/* Same autocomplete GitHub itself shows when a repo owner starts typing
+ * a name into the "Add people" box (see the /users page's "Add User"
+ * form in user_handlers.c). GitHub's public Search Users API needs no
+ * token; results are capped and rate-limited (10 unauthenticated
+ * requests/min), which is fine for this app's scale. */
+int oauth_github_search_users(const char *query, char logins[][GH_LOGIN_LEN], char avatars[][GH_AVATAR_LEN], int max) {
+    if (!query || !query[0] || max <= 0) return 0;
+
+    char enc_q[256];
+    url_encode(query, enc_q, sizeof(enc_q));
+
+    char request[600];
+    snprintf(request, sizeof(request),
+        "GET /search/users?q=%s&per_page=%d HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Accept: application/vnd.github+json\r\n"
+        "User-Agent: mini-gh-tracker\r\n"
+        "Connection: close\r\n\r\n",
+        enc_q, max, GH_API_HOST);
+
+    char *raw = https_roundtrip(GH_API_HOST, request);
+    if (!raw) return 0;
+
+    int status = 0;
+    char *json = NULL;
+    if (!split_http_response(raw, &status, &json) || status != 200) {
+        free(raw);
+        return 0; /* Alternative Flow: GitHub unreachable / rate-limited -- just show no matches */
+    }
+
+    /* "login" and "avatar_url" each appear exactly once per item, in
+     * the same relative order, inside the "items" array -- extracting
+     * them as two parallel flat scans and pairing by index is enough
+     * without a real JSON parser. */
+    int nlogins  = extract_all_strings(json, "login", (char *)logins, GH_LOGIN_LEN, max);
+    int navatars = extract_all_strings(json, "avatar_url", (char *)avatars, GH_AVATAR_LEN, max);
+    free(raw);
+    return nlogins < navatars ? nlogins : navatars;
 }

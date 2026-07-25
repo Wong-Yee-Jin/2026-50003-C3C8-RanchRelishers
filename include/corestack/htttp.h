@@ -42,6 +42,7 @@ int htttp_send_response(session_t *s, const http_response_t *resp);
 
 /* Convenience builders */
 void http_response_html(http_response_t *r, int status, const char *html);
+void http_response_json(http_response_t *r, int status, const char *json);
 void http_response_redirect(http_response_t *r, const char *location);
 
 /* Extract a URL-decoded form field ("key=value&...") from a request body

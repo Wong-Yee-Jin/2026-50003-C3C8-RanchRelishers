@@ -135,10 +135,8 @@ int main(int argc, char **argv) {
 
     project_handlers_register();
     issue_handlers_register();
-    comment_handlers_register();
     label_handlers_register();
     user_handlers_register();
-    time_handlers_register();
     auth_handlers_register();
 
     signal(SIGCHLD, reap_children);

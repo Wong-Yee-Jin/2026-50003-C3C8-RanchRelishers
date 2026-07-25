@@ -184,6 +184,15 @@ void http_response_html(http_response_t *r, int status, const char *html) {
     memcpy(r->body, html, r->body_len + 1);
 }
 
+void http_response_json(http_response_t *r, int status, const char *json) {
+    memset(r, 0, sizeof(*r));
+    r->status_code = status;
+    strncpy(r->content_type, "application/json; charset=utf-8", sizeof(r->content_type) - 1);
+    r->body_len = (int)strlen(json);
+    r->body = malloc(r->body_len + 1);
+    memcpy(r->body, json, r->body_len + 1);
+}
+
 void http_response_redirect(http_response_t *r, const char *location) {
     memset(r, 0, sizeof(*r));
     r->status_code = 302;
