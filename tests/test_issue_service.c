@@ -44,14 +44,21 @@ int main(void) {
     auth_ctx_set_user("local-user");
     CHECK(issue_service_add_assignee(is.id, u.id) == SVC_OK);
 
+    // a second project with an issue that would collide with the search and
+    // filter below if project scoping is broken
+    project_t p2; db_project_create("Q", &p2);
+    issue_t other;
+    CHECK(issue_service_create(p2.id, "Real also", "", &other) == SVC_OK);
+    CHECK(issue_service_set_status(other.id, STATUS_CLOSED) == SVC_OK);
+
     issue_t *s = NULL;
-    int sn = issue_service_search("Real", &s);       // no auth needed to read
-    CHECK(sn == 1);
+    int sn = issue_service_search(p.id, "Real", &s);       // no auth needed to read, scoped to p
+    CHECK(sn == 1);                                          // "other" matches "Real" too but lives in p2
     free(s);
 
     issue_t *f = NULL;
-    int fn = issue_service_filter("closed", NULL, &f);   // unset label filter passed as NULL
-    CHECK(fn == 1);
+    int fn = issue_service_filter(p.id, "closed", NULL, &f);   // unset label filter passed as NULL
+    CHECK(fn == 1);                                              // "other" is closed too but scoped out of p
     free(f);
 
     db_shutdown();

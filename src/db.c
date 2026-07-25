@@ -11,6 +11,12 @@
    old Mongo handle unsafe. */
 static sqlite3 *DB = NULL;
 
+/* The full schema as one script, run at every startup. Every table uses IF NOT
+   EXISTS so re-running is a no-op once created. foreign_keys is a per-connection
+   PRAGMA, so it has to be re-asserted here on each open, not just when the file
+   is first built. The join tables (issue_labels, issue_assignees) give each pair
+   a composite primary key, which is what lets the assign calls use INSERT OR
+   IGNORE to treat a duplicate as a no-op. */
 static const char *SCHEMA =
     "PRAGMA foreign_keys=ON;"
     "CREATE TABLE IF NOT EXISTS projects("
@@ -38,6 +44,10 @@ static const char *SCHEMA =
     "  issue_id TEXT NOT NULL REFERENCES issues(id),"
     "  text TEXT NOT NULL, created_at INTEGER NOT NULL);";
 
+/* Open the database (a file, or ":memory:" for tests) and lay down the schema.
+   Returns false if either step fails so main can stop before serving a half
+   built store. sqlite owns the error string, so it is printed and then released
+   with sqlite3_free, not free. */
 bool db_init(const char *path) {
     if (sqlite3_open(path, &DB) != SQLITE_OK) return false;
     char *err = NULL;
@@ -49,6 +59,8 @@ bool db_init(const char *path) {
     return true;
 }
 
+/* Close the connection and null the handle so a stray later call cannot act on
+   a freed pointer. */
 void db_shutdown(void) {
     sqlite3_close(DB);
     DB = NULL;
@@ -56,6 +68,9 @@ void db_shutdown(void) {
 
 /* ---- Project Management ---- */
 
+/* Create a project with a fresh random id and the given name. The menu has
+   already checked the name is free; a race that slips past still fails on the
+   UNIQUE constraint when the insert steps. */
 bool db_project_create(const char *name, project_t *out) {
     memset(out, 0, sizeof(*out));          // memset before copy, per the audit
     if (!id_generate(out->id)) return false;
@@ -71,6 +86,8 @@ bool db_project_create(const char *name, project_t *out) {
     return ok;
 }
 
+/* True when a project of this name already exists, so the menu can warn instead
+   of letting create fail on the UNIQUE column. */
 bool db_project_name_exists(const char *name) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, "SELECT 1 FROM projects WHERE name=?", -1, &st, NULL) != SQLITE_OK)
@@ -81,6 +98,8 @@ bool db_project_name_exists(const char *name) {
     return exists;
 }
 
+/* Load one project by id. Returns false when nothing matches, and out is left
+   zeroed by the memset so the caller never reads stale bytes. */
 bool db_project_find_by_id(const char *id, project_t *out) {
     memset(out, 0, sizeof(*out));
     sqlite3_stmt *st;
@@ -97,6 +116,9 @@ bool db_project_find_by_id(const char *id, project_t *out) {
     return found;
 }
 
+/* Return every project, name-sorted for the menu, as a heap array the caller
+   owns and frees. The return value is the count; 0 covers an empty table and
+   any allocation or query failure alike. */
 int db_project_list(project_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
@@ -105,12 +127,19 @@ int db_project_list(project_t **out_list) {
     int cap = 0, n = 0;
     project_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Grow by doubling so a long list does not realloc on every row. The
+           new block lands in tmp first: if realloc fails we still hold arr to
+           free it, and st is finalized on that path too, since an early return
+           would otherwise leak the prepared statement. arr is reassigned only
+           once realloc has succeeded. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             project_t *tmp = realloc(arr, ncap * sizeof(*arr));
             if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
             arr = tmp; cap = ncap;   // assign only after realloc succeeds, per the audit
         }
+        /* Zero the slot before the copies so any column the row leaves unset
+           reads back as an empty string rather than leftover bytes. */
         memset(&arr[n], 0, sizeof(arr[n]));
         snprintf(arr[n].id, sizeof(arr[n].id), "%s", sqlite3_column_text(st, 0));
         snprintf(arr[n].name, sizeof(arr[n].name), "%s", sqlite3_column_text(st, 1));
@@ -123,6 +152,8 @@ int db_project_list(project_t **out_list) {
 
 /* ---- Label Management ---- */
 
+/* Guard against a duplicate label name before create, the same idea as the
+   project check. */
 bool db_label_name_exists(const char *name) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, "SELECT 1 FROM labels WHERE name=?", -1, &st, NULL) != SQLITE_OK)
@@ -133,6 +164,8 @@ bool db_label_name_exists(const char *name) {
     return exists;
 }
 
+/* Create a label. description may arrive NULL from the caller, so it is stored
+   as "" to keep every later read free of a null check. */
 bool db_label_create(const char *name, const char *description, label_t *out) {
     memset(out, 0, sizeof(*out));
     if (!id_generate(out->id)) return false;
@@ -150,6 +183,8 @@ bool db_label_create(const char *name, const char *description, label_t *out) {
     return ok;
 }
 
+/* Load one label by id. description can be NULL in the table, so it is read
+   through a null check before the copy. */
 bool db_label_find_by_id(const char *id, label_t *out) {
     memset(out, 0, sizeof(*out));
     sqlite3_stmt *st;
@@ -168,6 +203,7 @@ bool db_label_find_by_id(const char *id, label_t *out) {
     return found;
 }
 
+/* Every label, name-sorted, as a heap array the caller frees. */
 int db_label_list(label_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
@@ -176,6 +212,8 @@ int db_label_list(label_t **out_list) {
     int cap = 0, n = 0;
     label_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Doubling growth; realloc into tmp so a failure still leaves arr
+           freeable and st finalizable before the return. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             label_t *tmp = realloc(arr, ncap * sizeof(*arr));
@@ -194,6 +232,7 @@ int db_label_list(label_t **out_list) {
     return n;
 }
 
+/* Install the default bug/feature/question labels, but only on a fresh store. */
 void db_labels_seed(void) {
     /* Only seed an empty table so calling this on every startup stays a no-op
        once the defaults exist. */
@@ -223,6 +262,7 @@ static void user_read_row(sqlite3_stmt *st, user_t *out) {
     out->github_id = sqlite3_column_int64(st, 4);
 }
 
+/* True when a username is already taken, checked before creating a local user. */
 bool db_user_name_exists(const char *username) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, "SELECT 1 FROM users WHERE username=?", -1, &st, NULL) != SQLITE_OK)
@@ -233,6 +273,8 @@ bool db_user_name_exists(const char *username) {
     return exists;
 }
 
+/* Create a local-only user with just a username. display_name, avatar_url and
+   github_id stay NULL until the account is later linked to GitHub. */
 bool db_user_create(const char *username, user_t *out) {
     memset(out, 0, sizeof(*out));
     if (!id_generate(out->id)) return false;
@@ -249,6 +291,7 @@ bool db_user_create(const char *username, user_t *out) {
     return ok;
 }
 
+/* Load one user by our own id. */
 bool db_user_find_by_id(const char *id, user_t *out) {
     memset(out, 0, sizeof(*out));
     sqlite3_stmt *st;
@@ -262,6 +305,8 @@ bool db_user_find_by_id(const char *id, user_t *out) {
     return found;
 }
 
+/* Load a user by their GitHub id, which is how login re-finds an account that
+   was linked on an earlier run. */
 bool db_user_find_by_github_id(long long github_id, user_t *out) {
     memset(out, 0, sizeof(*out));
     sqlite3_stmt *st;
@@ -275,6 +320,7 @@ bool db_user_find_by_github_id(long long github_id, user_t *out) {
     return found;
 }
 
+/* Every user, username-sorted, for the assignee picker. */
 int db_user_list(user_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
@@ -284,6 +330,8 @@ int db_user_list(user_t **out_list) {
     int cap = 0, n = 0;
     user_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Grow on demand, guarding the realloc the same way as the other list
+           queries. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             user_t *tmp = realloc(arr, ncap * sizeof(*arr));
@@ -298,6 +346,10 @@ int db_user_list(user_t **out_list) {
     return n;
 }
 
+/* Link or refresh a GitHub account. A github_id we have seen before updates the
+   mutable profile fields, since a name or avatar drifts as the user edits it on
+   GitHub; a new id inserts a row. Either branch reads the row back so the caller
+   receives the stored values, including the id we assigned. */
 bool db_user_upsert_github(long long github_id, const char *username,
                            const char *display_name, const char *avatar_url, user_t *out) {
     user_t existing;
@@ -348,6 +400,9 @@ static void issue_read_scalar(sqlite3_stmt *st, issue_t *out) {
     out->status = (issue_status_t)sqlite3_column_int(st, 5);
 }
 
+/* Create an issue under a project. The number is assigned per project, the id is
+   random, and title and description are copied through NULL checks because a
+   GitHub import can hand either one as NULL. */
 bool db_issue_create(const char *project_id, const char *title,
                      const char *description, issue_t *out) {
     memset(out, 0, sizeof(*out));
@@ -387,6 +442,11 @@ bool db_issue_create(const char *project_id, const char *title,
     return ok;
 }
 
+/* Load one issue and, unlike the list paths, also its labels and assignees. Each
+   association is a second query, and each read loop stops at the in-memory cap so
+   a row with more than MAX_LABELS or MAX_ASSIGNEES cannot overrun the fixed
+   arrays. A failed prepare on either association is tolerated: the issue still
+   returns with whatever it already has. */
 bool db_issue_find_by_id(const char *id, issue_t *out) {
     memset(out, 0, sizeof(*out));
     sqlite3_stmt *st;
@@ -423,6 +483,7 @@ bool db_issue_find_by_id(const char *id, issue_t *out) {
     return true;
 }
 
+/* Move an issue between open and closed. */
 bool db_issue_set_status(const char *id, issue_status_t new_status) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, "UPDATE issues SET status=? WHERE id=?", -1, &st, NULL) != SQLITE_OK)
@@ -434,6 +495,8 @@ bool db_issue_set_status(const char *id, issue_status_t new_status) {
     return ok;
 }
 
+/* Every issue in a project, ordered by the per-project number so the list reads
+   1, 2, 3. Scalars only; labels and assignees are not loaded for a list view. */
 int db_issue_list_by_project(const char *project_id, issue_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
@@ -445,6 +508,8 @@ int db_issue_list_by_project(const char *project_id, issue_t **out_list) {
     int cap = 0, n = 0;
     issue_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Same doubling buffer; the realloc-failure branch frees arr and
+           finalizes st before returning 0. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
@@ -459,6 +524,7 @@ int db_issue_list_by_project(const char *project_id, issue_t **out_list) {
     return n;
 }
 
+/* Attach a label to an issue. */
 bool db_issue_assign_label(const char *issue_id, const char *label_id) {
     sqlite3_stmt *st;
     /* OR IGNORE turns a repeat assignment into a no-op instead of a constraint
@@ -484,7 +550,10 @@ static void like_escape(const char *in, char *out, size_t outlen) {
     out[j] = '\0';
 }
 
-int db_issue_search(const char *keyword, int limit, issue_t **out_list) {
+/* Substring search over title and description within one project. The keyword is
+   LIKE-escaped, wrapped in %...%, then bound, so a % or _ the user types matches
+   literally instead of behaving as a wildcard. limit caps the returned rows. */
+int db_issue_search(const char *project_id, const char *keyword, int limit, issue_t **out_list) {
     *out_list = NULL;
     if (!keyword) keyword = "";   // caller input crosses a trust boundary here and may be NULL
     char esc[256], pattern[300];
@@ -493,15 +562,18 @@ int db_issue_search(const char *keyword, int limit, issue_t **out_list) {
     sqlite3_stmt *st;
     const char *sql =
         "SELECT id, project_id, issue_number, title, description, status "
-        "FROM issues WHERE title LIKE ? ESCAPE '\\' "
-        "OR description LIKE ? ESCAPE '\\' ORDER BY issue_number LIMIT ?";
+        "FROM issues WHERE project_id = ? AND (title LIKE ? ESCAPE '\\' "
+        "OR description LIKE ? ESCAPE '\\') ORDER BY issue_number LIMIT ?";
     if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return 0;
-    sqlite3_bind_text(st, 1, pattern, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 1, project_id, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, pattern, -1, SQLITE_STATIC);
-    sqlite3_bind_int(st, 3, limit);
+    sqlite3_bind_text(st, 3, pattern, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 4, limit);
     int cap = 0, n = 0;
     issue_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Grow the result array by doubling; the failure branch frees arr and
+           finalizes st before the early return. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
@@ -516,7 +588,10 @@ int db_issue_search(const char *keyword, int limit, issue_t **out_list) {
     return n;
 }
 
-int db_issue_filter(const char *status_filter, const char *label_id_filter,
+/* List a project's issues narrowed by an optional status and/or label. Only fixed
+   SQL fragments are chosen in C here; every actual value is bound below, and the
+   bind index walks forward only over the fragments that were included. */
+int db_issue_filter(const char *project_id, const char *status_filter, const char *label_id_filter,
                     int limit, issue_t **out_list) {
     *out_list = NULL;
     bool has_status = status_filter != NULL;
@@ -525,24 +600,26 @@ int db_issue_filter(const char *status_filter, const char *label_id_filter,
     if (has_status) status_val = (strcmp(status_filter, "closed") == 0) ? STATUS_CLOSED : STATUS_OPEN;
 
     /* Only fixed clause fragments are chosen in C. Every user value is bound,
-       so no keyword or id reaches the SQL text. */
+       so no keyword or id reaches the SQL text. project_id is always the
+       leading condition, status and label stay optional. */
     char sql[512];
     if (has_label) {
         snprintf(sql, sizeof(sql),
             "SELECT i.id, i.project_id, i.issue_number, i.title, i.description, i.status "
             "FROM issues i JOIN issue_labels il ON il.issue_id = i.id "
-            "WHERE il.label_id = ?%s ORDER BY i.issue_number LIMIT ?",
+            "WHERE i.project_id = ? AND il.label_id = ?%s ORDER BY i.issue_number LIMIT ?",
             has_status ? " AND i.status = ?" : "");
     } else {
         snprintf(sql, sizeof(sql),
             "SELECT id, project_id, issue_number, title, description, status "
-            "FROM issues%s ORDER BY issue_number LIMIT ?",
-            has_status ? " WHERE status = ?" : "");
+            "FROM issues WHERE project_id = ?%s ORDER BY issue_number LIMIT ?",
+            has_status ? " AND status = ?" : "");
     }
 
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     int idx = 1;
+    sqlite3_bind_text(st, idx++, project_id, -1, SQLITE_STATIC);
     if (has_label) sqlite3_bind_text(st, idx++, label_id_filter, -1, SQLITE_STATIC);
     if (has_status) sqlite3_bind_int(st, idx++, status_val);
     sqlite3_bind_int(st, idx++, limit);
@@ -550,6 +627,7 @@ int db_issue_filter(const char *status_filter, const char *label_id_filter,
     int cap = 0, n = 0;
     issue_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Same guarded doubling as the other list queries. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
@@ -564,6 +642,8 @@ int db_issue_filter(const char *status_filter, const char *label_id_filter,
     return n;
 }
 
+/* Attach an assignee to an issue. OR IGNORE makes assigning the same user twice
+   a no-op rather than a constraint error. */
 bool db_issue_assign_user(const char *issue_id, const char *user_id) {
     sqlite3_stmt *st;
     const char *sql = "INSERT OR IGNORE INTO issue_assignees(issue_id, user_id) VALUES(?, ?)";
@@ -577,6 +657,8 @@ bool db_issue_assign_user(const char *issue_id, const char *user_id) {
 
 /* ---- Comments ---- */
 
+/* Add a comment to an issue, stamping created_at with the current unix time so
+   the listing can order by when it was written. */
 bool db_comment_add(const char *issue_id, const char *text) {
     char id[ID_LEN];
     if (!id_generate(id)) return false;
@@ -592,6 +674,7 @@ bool db_comment_add(const char *issue_id, const char *text) {
     return ok;
 }
 
+/* All comments on an issue, oldest first. */
 int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
@@ -605,6 +688,8 @@ int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
     int cap = 0, n = 0;
     comment_t *arr = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Doubling growth; realloc into tmp so a failure frees arr and finalizes
+           st before returning. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             comment_t *tmp = realloc(arr, ncap * sizeof(*arr));

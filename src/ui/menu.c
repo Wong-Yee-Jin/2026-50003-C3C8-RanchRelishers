@@ -188,7 +188,7 @@ static void screen_issues(const char *project_id, const char *project_name) {
             printf("keyword: ");
             if (!read_line(kw, sizeof(kw))) return;
             issue_t *results = NULL;
-            int rn = issue_service_search(kw, &results);
+            int rn = issue_service_search(project_id, kw, &results);
             printf("-- results for \"%s\" --\n", kw);
             if (rn == 0) printf("(no matches)\n");
             for (int i = 0; i < rn; i++) {
@@ -209,7 +209,7 @@ static void screen_issues(const char *project_id, const char *project_name) {
             const char *status_arg = status_in[0] ? status_in : NULL;
             const char *label_arg = label_in[0] ? label_in : NULL;
             issue_t *results = NULL;
-            int rn = issue_service_filter(status_arg, label_arg, &results);
+            int rn = issue_service_filter(project_id, status_arg, label_arg, &results);
             printf("-- filtered issues --\n");
             if (rn == 0) printf("(no matches)\n");
             for (int i = 0; i < rn; i++) {

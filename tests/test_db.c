@@ -68,17 +68,24 @@ int main(void) {
     issue_t *il = NULL; int in = db_issue_list_by_project(p.id, &il);
     CHECK(in == 2); free(il);
 
+    // a second project with an issue that would collide with the searches
+    // and filters below if project scoping is broken
+    project_t p2;
+    CHECK(db_project_create("Mobile", &p2) == true);
+    issue_t i3;
+    CHECK(db_issue_create(p2.id, "Login button broken", "steps...", &i3) == true);
+
     // i1 title "Login broken", i2 title "Second" from Task 1.6
     issue_t *s = NULL;
-    int sn = db_issue_search("login", 50, &s);      // case-insensitive substring
-    CHECK(sn == 1); free(s);
+    int sn = db_issue_search(p.id, "login", 50, &s);   // case-insensitive substring, scoped to p
+    CHECK(sn == 1); free(s);                            // i3 also matches "login" but lives in p2
 
-    int sn2 = db_issue_search("%", 50, &s);          // literal percent, not a match-all
-    CHECK(sn2 == 0); free(s);                         // proves % is escaped, not a wildcard
+    int sn2 = db_issue_search(p.id, "%", 50, &s);       // literal percent, not a match-all
+    CHECK(sn2 == 0); free(s);                            // proves % is escaped, not a wildcard
 
     issue_t *f = NULL;
-    int fn = db_issue_filter("open", NULL, 50, &f);   // i2 is open, i1 was closed
-    CHECK(fn == 1); free(f);
+    int fn = db_issue_filter(p.id, "open", NULL, 50, &f);   // i2 is open, i1 was closed
+    CHECK(fn == 1); free(f);                                 // i3 is open too but must not leak in from p2
 
     CHECK(db_comment_add(i1.id, "first note") == true);
     CHECK(db_comment_add(i1.id, "second note") == true);
@@ -88,8 +95,8 @@ int main(void) {
     free(cl);
 
     issue_t *sg = NULL;
-    int sgn = db_issue_search(NULL, 50, &sg);   // NULL keyword must not crash, matches all rows
-    CHECK(sgn >= 0);
+    int sgn = db_issue_search(p.id, NULL, 50, &sg);   // NULL keyword must not crash, matches all rows in p
+    CHECK(sgn == 2);   // i1 and i2 only, i3 is scoped out because it belongs to p2
     free(sg);
 
     issue_t io;
