@@ -45,8 +45,11 @@ gh_status_t github_device_poll(const char *device_code, char *token_out, size_t 
    db_user_upsert_github. Reads id, login, name, and avatar_url from the
    response. GitHub allows a null name, so a missing or null name falls back
    to the login for the display name. Returns false on an HTTP failure, a
-   missing id or login, or a failed upsert. */
-bool github_fetch_and_upsert_user(const char *token, user_t *out);
+   missing id or login, or a failed upsert. rejected may be NULL; when given
+   it is set true only when GitHub itself answered 401 or 403, meaning the
+   token is actually invalid rather than the request never reaching GitHub,
+   so a caller can tell a real rejection apart from a network problem. */
+bool github_fetch_and_upsert_user(const char *token, user_t *out, bool *rejected);
 
 /* Pull the name field out of each object in a top-level JSON array, such as
    the body of GET /user/repos. Pure and network-free so it is unit tested

@@ -331,20 +331,24 @@ static char gh_username[USERNAME_LEN] = "";
 #define GH_MAX_POLLS 180
 
 /* Startup identity: a cached token that still checks out with GitHub upgrades
-   the session to that real user; a rejected token is dropped so we do not
-   keep retrying it. Either way we end up signed in, local when there is no
-   usable token, so the tracker never requires a login to be useful. */
+   the session to that real user. A token GitHub actually rejects (401/403)
+   is dropped so we do not keep retrying it; a transport failure (offline, DNS,
+   a stalled connection) leaves the token alone, since it says nothing about
+   whether the token is still good, and just falls back to local for this
+   session. Either way we end up signed in, local when there is no usable
+   token, so the tracker never requires a login to be useful. */
 static void github_resume_session(void) {
     char token[256];
     if (token_load(token, sizeof(token))) {
         user_t user;
-        if (github_fetch_and_upsert_user(token, &user)) {
+        bool rejected = false;
+        if (github_fetch_and_upsert_user(token, &user, &rejected)) {
             auth_ctx_set_user(user.id);
             snprintf(gh_username, sizeof(gh_username), "%s", user.username);
             printf("Signed in as %s\n", user.username);
             return;
         }
-        token_clear();
+        if (rejected) token_clear();
     }
     auth_ctx_set_user("local");
 }
@@ -359,25 +363,43 @@ static void github_login(void) {
     printf("Open %s and enter code: %s\n", dev.verification_uri, dev.user_code);
 
     int interval = dev.interval;
+    // a malformed device response could hand back an interval that busy-polls
+    // or, cast to unsigned for sleep(), sleeps for close to forever
+    if (interval < 1 || interval > 60) interval = 5;
+
     char token[256];
+    int consecutive_errors = 0;
     for (int poll = 0; poll < GH_MAX_POLLS; poll++) {
         sleep((unsigned int)interval);
         gh_status_t poll_status = github_device_poll(dev.device_code, token, sizeof(token));
 
         if (poll_status == GH_OK) {
-            token_save(token);
+            if (!token_save(token))
+                printf("warning: could not save the login token, you will need to sign in again next start\n");
             user_t user;
-            if (github_fetch_and_upsert_user(token, &user)) {
+            bool rejected = false;
+            if (github_fetch_and_upsert_user(token, &user, &rejected)) {
                 auth_ctx_set_user(user.id);
                 snprintf(gh_username, sizeof(gh_username), "%s", user.username);
                 printf("Signed in as %s\n", user.username);
+            } else {
+                printf("signed in, but fetching your GitHub profile failed; try again later\n");
             }
             return;
         }
-        if (poll_status == GH_SLOW_DOWN) { interval += 5; continue; }
+        if (poll_status == GH_SLOW_DOWN) { interval += 5; consecutive_errors = 0; continue; }
         if (poll_status == GH_DENIED) { printf("authorization denied\n"); return; }
         if (poll_status == GH_EXPIRED) { printf("code expired, try again\n"); return; }
-        if (poll_status == GH_ERROR) { printf("could not reach GitHub, try again\n"); return; }
+        if (poll_status == GH_ERROR) {
+            // a momentary network blip should not throw away an in-progress
+            // login; only give up after a few in a row
+            if (++consecutive_errors >= 3) {
+                printf("could not reach GitHub, try again\n");
+                return;
+            }
+            continue;
+        }
+        consecutive_errors = 0;
         // GH_PENDING: the user has not authorized yet, poll again
     }
     printf("timed out waiting for authorization, try again\n");

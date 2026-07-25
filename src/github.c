@@ -34,11 +34,18 @@ static struct curl_slist *common_headers(struct curl_slist *h) {
     return h;
 }
 
+/* The shared tail of both the POST and GET helpers: set the options every
+   transfer needs and run it. Keeping this in one place stops the timeout and
+   user-agent choices from drifting apart between the two callers. */
 static bool perform(CURL *curl, struct curl_slist *headers, resp_buf *r) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "mini-gh-tracker");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, r);
+    /* A stalled connection must not freeze the menu. 10s to connect and 30s
+       total keeps a dead network from hanging any of the callers below. */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     CURLcode rc = curl_easy_perform(curl);
     return rc == CURLE_OK;
 }
@@ -62,19 +69,28 @@ static bool http_post_form(const char *url, const char *body, char *out, size_t 
 }
 
 /* GET with a bearer token, for the authenticated GitHub API. The device flow
-   never calls this; it backs the user and repo fetches below. */
+   never calls this; it backs the user and repo fetches below. http_status is
+   set to the HTTP response code when the transfer completes, or left at 0
+   when the transfer itself failed, so a caller can tell "GitHub answered
+   with an error" apart from "we never reached GitHub". */
 static bool
-http_get_bearer(const char *url, const char *token, char *out, size_t outlen) {
+http_get_bearer(const char *url, const char *token, char *out, size_t outlen,
+                long *http_status) {
+    if (http_status) *http_status = 0;
     if (outlen == 0) return false;
     CURL *curl = curl_easy_init();
     if (!curl) return false;
     resp_buf r = { out, 0, outlen - 1 };
+    /* The token rides only in this Authorization header, never in the URL or a
+       log line, so it stays out of shell history and any server access log. */
     char auth[512];
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", token);
     struct curl_slist *headers = common_headers(NULL);
     headers = curl_slist_append(headers, auth);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     bool ok = perform(curl, headers, &r);
+    if (ok && http_status)
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_status);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     if (!ok) return false;
@@ -82,6 +98,10 @@ http_get_bearer(const char *url, const char *token, char *out, size_t outlen) {
     return true;
 }
 
+/* Classify a token-endpoint reply with no network of its own. A present
+   access_token means success; otherwise the error string GitHub returns during
+   a device flow selects the matching status, and anything unrecognized falls
+   through to GH_ERROR. */
 gh_status_t github_parse_token_response(const char *body, char *token_out, size_t outlen) {
     if (json_field(body, "access_token", token_out, outlen)) return GH_OK;
     char err[64];
@@ -93,6 +113,10 @@ gh_status_t github_parse_token_response(const char *body, char *token_out, size_
     return GH_ERROR;
 }
 
+/* Open the device flow by requesting a code pair from GitHub. The client id and
+   scope are read from the environment (GH_CLIENT_ID, GH_SCOPE) so no secret is
+   compiled into the binary and another deployment can supply its own. A missing
+   client id is a hard failure; an unset scope defaults to read:user. */
 gh_status_t github_device_start(gh_device_t *out) {
     const char *client_id = getenv("GH_CLIENT_ID");
     if (!client_id || !*client_id) return GH_ERROR;
@@ -116,6 +140,9 @@ gh_status_t github_device_start(gh_device_t *out) {
     return GH_OK;
 }
 
+/* One poll of the token endpoint using the device_code from the start call. The
+   caller repeats this on GH_PENDING and GH_SLOW_DOWN until the person finishes
+   in the browser or the code expires. */
 gh_status_t github_device_poll(const char *device_code, char *token_out, size_t outlen) {
     const char *client_id = getenv("GH_CLIENT_ID");
     if (!client_id || !*client_id) return GH_ERROR;
@@ -133,10 +160,18 @@ gh_status_t github_device_poll(const char *device_code, char *token_out, size_t 
     return github_parse_token_response(resp, token_out, outlen);
 }
 
-bool github_fetch_and_upsert_user(const char *token, user_t *out) {
-    char resp[4096];
-    if (!http_get_bearer("https://api.github.com/user", token, resp, sizeof(resp)))
-        return false;
+/* Fetch the authenticated user with the token and mirror the result into our
+   local users table. The header spells out the field handling; the inline notes
+   below cover the rejection check and the null-name fallback. */
+bool github_fetch_and_upsert_user(const char *token, user_t *out, bool *rejected) {
+    char resp[8192];
+    long status = 0;
+    bool ok = http_get_bearer("https://api.github.com/user", token, resp, sizeof(resp), &status);
+    /* status stays 0 on a transport failure, so this is only true when we
+       actually reached GitHub and it answered 401/403: a real rejection of
+       the token, not a stalled connection or a DNS failure. */
+    if (rejected) *rejected = (status == 401 || status == 403);
+    if (!ok) return false;
 
     long long id = json_field_int(resp, "id", 0);
     char login[USERNAME_LEN];
@@ -157,18 +192,23 @@ bool github_fetch_and_upsert_user(const char *token, user_t *out) {
     return db_user_upsert_github(id, login, name, avatar, out);
 }
 
+/* Lift the name field out of each object in a /user/repos body. A thin wrapper
+   over the array walker, kept on its own so the parse can be tested without a
+   live request. */
 int github_parse_repo_names(const char *body, char names[][128], int max) {
     return json_array_objects(body, "name", names, max);
 }
 
+/* Fetch the user's repositories and hand back just their names. */
 int github_list_repos(const char *token, char names[][128], int max) {
-    /* A page of 100 full repo objects can run past a few hundred KB, too big
-       for a comfortable stack buffer, so this one is heap allocated. */
-    size_t cap = 262144;
+    /* A page of full repo objects can run past a few hundred KB, too big for
+       a comfortable stack buffer, so this one is heap allocated. per_page is
+       kept well under a page's worst case and the cap gives it headroom. */
+    size_t cap = 1048576;
     char *resp = malloc(cap);
     if (!resp) return -1;
-    bool ok = http_get_bearer("https://api.github.com/user/repos?per_page=100&sort=updated",
-                              token, resp, cap);
+    bool ok = http_get_bearer("https://api.github.com/user/repos?per_page=30&sort=updated",
+                              token, resp, cap, NULL);
     int n = ok ? github_parse_repo_names(resp, names, max) : -1;
     free(resp);
     return n;
