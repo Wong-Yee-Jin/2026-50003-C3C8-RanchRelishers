@@ -1,10 +1,13 @@
 #include "ui/menu.h"
 #include "core/auth_ctx.h"
 #include "core/services.h"
+#include "github.h"
+#include "token_store.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 char *ui_trim(char *s) {
     char *start = s;
@@ -316,21 +319,107 @@ static void screen_assignees(void) {
     read_line(line, sizeof(line));
 }
 
+/* Tracks the GitHub username for the current process, empty when the signed
+   in identity is just the local fallback. This is what decides whether item
+   4 shows "GitHub login" or "Log out", since auth_ctx itself is authed
+   either way (local counts as signed in so the tracker works offline). */
+static char gh_username[USERNAME_LEN] = "";
+
+/* A device flow poll should not wait forever on a code nobody entered. This
+   caps it around GitHub's own 15 minute expiry at a 5 second interval, with
+   room to spare for the slow_down backoff. */
+#define GH_MAX_POLLS 180
+
+/* Startup identity: a cached token that still checks out with GitHub upgrades
+   the session to that real user; a rejected token is dropped so we do not
+   keep retrying it. Either way we end up signed in, local when there is no
+   usable token, so the tracker never requires a login to be useful. */
+static void github_resume_session(void) {
+    char token[256];
+    if (token_load(token, sizeof(token))) {
+        user_t user;
+        if (github_fetch_and_upsert_user(token, &user)) {
+            auth_ctx_set_user(user.id);
+            snprintf(gh_username, sizeof(gh_username), "%s", user.username);
+            printf("Signed in as %s\n", user.username);
+            return;
+        }
+        token_clear();
+    }
+    auth_ctx_set_user("local");
+}
+
+static void github_login(void) {
+    gh_device_t dev;
+    gh_status_t status = github_device_start(&dev);
+    if (status == GH_ERROR) {
+        printf("Set GH_CLIENT_ID and enable device flow on your GitHub OAuth app\n");
+        return;
+    }
+    printf("Open %s and enter code: %s\n", dev.verification_uri, dev.user_code);
+
+    int interval = dev.interval;
+    char token[256];
+    for (int poll = 0; poll < GH_MAX_POLLS; poll++) {
+        sleep((unsigned int)interval);
+        gh_status_t poll_status = github_device_poll(dev.device_code, token, sizeof(token));
+
+        if (poll_status == GH_OK) {
+            token_save(token);
+            user_t user;
+            if (github_fetch_and_upsert_user(token, &user)) {
+                auth_ctx_set_user(user.id);
+                snprintf(gh_username, sizeof(gh_username), "%s", user.username);
+                printf("Signed in as %s\n", user.username);
+            }
+            return;
+        }
+        if (poll_status == GH_SLOW_DOWN) { interval += 5; continue; }
+        if (poll_status == GH_DENIED) { printf("authorization denied\n"); return; }
+        if (poll_status == GH_EXPIRED) { printf("code expired, try again\n"); return; }
+        if (poll_status == GH_ERROR) { printf("could not reach GitHub, try again\n"); return; }
+        // GH_PENDING: the user has not authorized yet, poll again
+    }
+    printf("timed out waiting for authorization, try again\n");
+}
+
+static void github_logout(void) {
+    token_clear();
+    auth_ctx_set_user("local");   // back to the local identity, still usable offline
+    gh_username[0] = '\0';
+    printf("Logged out of GitHub\n");
+}
+
+static void github_repos(void) {
+    char token[256];
+    if (!token_load(token, sizeof(token))) {
+        printf("Sign in with GitHub first (menu item 4)\n");
+        return;
+    }
+    char names[100][128];
+    int n = github_list_repos(token, names, 100);
+    if (n == -1) printf("could not fetch repositories\n");
+    else if (n == 0) printf("no repositories\n");
+    else for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
+}
+
 void menu_run(void) {
-    auth_ctx_set_user("local");   // no GitHub login yet, so the single local user is always signed in
+    github_resume_session();
     char line[64];
     for (;;) {
         printf("\n=== mini-gh-tracker ===\n"
-               "1) Projects\n2) Labels\n3) Assignees\n"
-               "4) GitHub login\n5) My repos\n0) Quit\n> ");
+               "1) Projects\n2) Labels\n3) Assignees\n");
+        if (gh_username[0]) printf("4) Log out (%s)\n", gh_username);
+        else printf("4) GitHub login\n");
+        printf("5) My repos\n0) Quit\n> ");
         if (!read_line(line, sizeof(line))) return;   // stdin closed, act like Quit
 
         switch (ui_parse_choice(line)) {
             case 1: screen_projects(); break;
             case 2: screen_labels(); break;
             case 3: screen_assignees(); break;
-            case 4: printf("GitHub login is available after the M4 login is added.\n"); break;
-            case 5: printf("My repos is available after the M4 login is added.\n"); break;
+            case 4: gh_username[0] ? github_logout() : github_login(); break;
+            case 5: github_repos(); break;
             case 0: return;
             default: printf("unknown choice\n");
         }
