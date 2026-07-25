@@ -572,3 +572,49 @@ bool db_issue_assign_user(const char *issue_id, const char *user_id) {
     sqlite3_finalize(st);
     return ok;
 }
+
+/* ---- Comments ---- */
+
+bool db_comment_add(const char *issue_id, const char *text) {
+    char id[ID_LEN];
+    if (!id_generate(id)) return false;
+    sqlite3_stmt *st;
+    const char *sql = "INSERT INTO comments(id, issue_id, text, created_at) VALUES(?, ?, ?, ?)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, issue_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, text, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 4, (long long)time(NULL));
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
+    *out_list = NULL;
+    sqlite3_stmt *st;
+    /* rowid breaks ties within a single created_at second so two comments added
+       back to back keep the order they were written, which the seconds-only
+       timestamp cannot guarantee on its own. */
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, text FROM comments WHERE issue_id=? ORDER BY created_at, rowid",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, issue_id, -1, SQLITE_STATIC);
+    int cap = 0, n = 0;
+    comment_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            comment_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;
+        }
+        memset(&arr[n], 0, sizeof(arr[n]));
+        snprintf(arr[n].id, sizeof(arr[n].id), "%s", sqlite3_column_text(st, 0));
+        snprintf(arr[n].text, sizeof(arr[n].text), "%s", sqlite3_column_text(st, 1));
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}

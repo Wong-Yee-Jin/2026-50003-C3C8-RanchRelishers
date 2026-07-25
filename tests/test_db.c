@@ -80,6 +80,13 @@ int main(void) {
     int fn = db_issue_filter("open", NULL, 50, &f);   // i2 is open, i1 was closed
     CHECK(fn == 1); free(f);
 
+    CHECK(db_comment_add(i1.id, "first note") == true);
+    CHECK(db_comment_add(i1.id, "second note") == true);
+    comment_t *cl = NULL; int cn = db_comment_list_by_issue(i1.id, &cl);
+    CHECK(cn == 2);
+    CHECK_STR(cl[0].text, "first note");   // ordered by created_at ascending
+    free(cl);
+
     db_shutdown();
     return TEST_SUMMARY();
 }
