@@ -25,6 +25,14 @@ int main(void) {
     CHECK(list != NULL);
     free(list);
 
+    label_t lb;
+    CHECK(db_label_create("bug", "defect", &lb) == true);
+    CHECK(strlen(lb.id) == 24);
+    CHECK(db_label_name_exists("bug") == true);
+    label_t lf; CHECK(db_label_find_by_id(lb.id, &lf) == true);
+    CHECK_STR(lf.description, "defect");
+    label_t *ll = NULL; int ln = db_label_list(&ll); CHECK(ln == 1); free(ll);
+
     db_shutdown();
     return TEST_SUMMARY();
 }

@@ -120,3 +120,89 @@ int db_project_list(project_t **out_list) {
     *out_list = arr;
     return n;
 }
+
+/* ---- Label Management ---- */
+
+bool db_label_name_exists(const char *name) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT 1 FROM labels WHERE name=?", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+    bool exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return exists;
+}
+
+bool db_label_create(const char *name, const char *description, label_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!id_generate(out->id)) return false;
+    snprintf(out->name, sizeof(out->name), "%s", name);
+    snprintf(out->description, sizeof(out->description), "%s", description ? description : "");
+
+    sqlite3_stmt *st;
+    const char *sql = "INSERT INTO labels(id, name, description) VALUES(?, ?, ?)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, out->id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, out->name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, out->description, -1, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool db_label_find_by_id(const char *id, label_t *out) {
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT id, name, description FROM labels WHERE id=?",
+                           -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        snprintf(out->id, sizeof(out->id), "%s", sqlite3_column_text(st, 0));
+        snprintf(out->name, sizeof(out->name), "%s", sqlite3_column_text(st, 1));
+        const unsigned char *d = sqlite3_column_text(st, 2);
+        snprintf(out->description, sizeof(out->description), "%s", d ? (const char *)d : "");
+        found = true;
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
+int db_label_list(label_t **out_list) {
+    *out_list = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "SELECT id, name, description FROM labels ORDER BY name",
+                           -1, &st, NULL) != SQLITE_OK) return 0;
+    int cap = 0, n = 0;
+    label_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            label_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;
+        }
+        memset(&arr[n], 0, sizeof(arr[n]));
+        snprintf(arr[n].id, sizeof(arr[n].id), "%s", sqlite3_column_text(st, 0));
+        snprintf(arr[n].name, sizeof(arr[n].name), "%s", sqlite3_column_text(st, 1));
+        const unsigned char *d = sqlite3_column_text(st, 2);
+        snprintf(arr[n].description, sizeof(arr[n].description), "%s", d ? (const char *)d : "");
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}
+
+void db_labels_seed(void) {
+    /* Only seed an empty table so calling this on every startup stays a no-op
+       once the defaults exist. */
+    label_t *existing = NULL;
+    int n = db_label_list(&existing);
+    free(existing);
+    if (n > 0) return;
+    label_t tmp;
+    db_label_create("bug", "", &tmp);
+    db_label_create("feature", "", &tmp);
+    db_label_create("question", "", &tmp);
+}
