@@ -3,6 +3,8 @@
 #include "core/services.h"
 #include "github.h"
 #include "token_store.h"
+#include "render.h"
+#include "assets.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +60,27 @@ static void print_result(svc_result_t r, const char *invalid_reason) {
     }
 }
 
+/* Prints a screen's title, styled to how much room the terminal actually
+   has. render_mode() is re-queried on every call rather than cached, so a
+   terminal resized between screens picks up the new mode on the next
+   screen the user opens instead of staying stuck at whatever mode was
+   active at startup. */
+static void screen_header(const char *title) {
+    switch (render_mode()) {
+        case RENDER_FULL:
+            printf("\n%s%s%s  %s%s%s\n", render_accent(), logo_compact, render_reset(),
+                   render_accent(), title, render_reset());
+            break;
+        case RENDER_COMPACT:
+            printf("\n%s%s%s\n", render_accent(), title, render_reset());
+            break;
+        case RENDER_MINIMAL:
+            printf("\n%s\n%senlarge to 80x24 for the full art%s\n",
+                   title, render_dim(), render_reset());
+            break;
+    }
+}
+
 static void print_issue(const issue_t *is) {
     printf("\n#%d %s [%s]\n", is->issue_number, is->title,
            is->status == STATUS_OPEN ? "open" : "closed");
@@ -105,6 +128,9 @@ static void screen_issue_detail(const char *issue_id) {
     for (;;) {
         issue_t is;
         if (issue_service_get(issue_id, &is) != SVC_OK) { printf("not found\n"); return; }
+        char title[32];
+        snprintf(title, sizeof(title), "Issue #%d", is.issue_number);
+        screen_header(title);
         print_issue(&is);
         printf("\nt) toggle status   l) add label   a) assign user   "
                "m) add comment   0) back\n> ");
@@ -166,7 +192,9 @@ static void screen_issues(const char *project_id, const char *project_name) {
     for (;;) {
         issue_t *issues = NULL;
         int n = issue_service_list(project_id, &issues);
-        printf("\n-- Issues: %s --\n", project_name);
+        char title[TITLE_LEN + 16];
+        snprintf(title, sizeof(title), "Issues: %s", project_name);
+        screen_header(title);
         if (n == 0) printf("(no issues yet)\n");
         for (int i = 0; i < n; i++) {
             printf("  %d) #%d [%s] %s\n", i + 1, issues[i].issue_number,
@@ -242,7 +270,7 @@ static void screen_projects(void) {
     for (;;) {
         project_t *projects = NULL;
         int n = project_service_list(&projects);
-        printf("\n-- Projects --\n");
+        screen_header("Projects");
         if (n == 0) printf("(no projects yet)\n");
         for (int i = 0; i < n; i++) printf("  %d) %s\n", i + 1, projects[i].name);
         printf("  c) create   0) back\n> ");
@@ -278,7 +306,7 @@ static void screen_labels(void) {
     for (;;) {
         label_t *labels = NULL;
         int n = label_service_list(&labels);
-        printf("\n-- Labels --\n");
+        screen_header("Labels");
         if (n == 0) printf("(no labels yet)\n");
         for (int i = 0; i < n; i++) {
             printf("  %d) %s", i + 1, labels[i].name);
@@ -310,7 +338,7 @@ static void screen_labels(void) {
 static void screen_assignees(void) {
     user_t *users = NULL;
     int n = user_service_list(&users);
-    printf("\n-- Assignees --\n");
+    screen_header("Assignees");
     if (n == 0) printf("(no users yet)\n");
     for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
     free(users);
@@ -426,11 +454,13 @@ static void github_repos(void) {
 }
 
 void menu_run(void) {
+    render_request_size();
+    render_splash();
     github_resume_session();
     char line[64];
     for (;;) {
-        printf("\n=== mini-gh-tracker ===\n"
-               "1) Projects\n2) Labels\n3) Assignees\n");
+        screen_header("Main Menu");
+        printf("1) Projects\n2) Labels\n3) Assignees\n");
         if (gh_username[0]) printf("4) Log out (%s)\n", gh_username);
         else printf("4) GitHub login\n");
         printf("5) My repos\n0) Quit\n> ");

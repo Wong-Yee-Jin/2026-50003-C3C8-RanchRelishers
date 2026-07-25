@@ -40,4 +40,16 @@ const char *render_accent(void);
 const char *render_dim(void);
 const char *render_reset(void);
 
+/* Prints one frame of the intro sweep: the wordmark from assets.h with a
+   moving accent-colored column span. frame is the 0-based current index,
+   total is the frame count, so the caller (render_splash) owns the timing
+   and this just draws a single frame each call. */
+void splash_render_frame(int frame, int total);
+
+/* Plays the animated intro once in FULL mode, prints the static compact logo
+   in COMPACT, and does nothing in MINIMAL. Skippable on any keypress.
+   A no-op unless both stdin and stdout are ttys, so piped runs never see it
+   or block on it. Restores stdin's termios before returning on every path. */
+void render_splash(void);
+
 #endif
