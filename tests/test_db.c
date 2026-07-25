@@ -43,6 +43,31 @@ int main(void) {
     CHECK(uf.github_id == 42);
     user_t *ul = NULL; int un = db_user_list(&ul); CHECK(un == 1); free(ul);
 
+    issue_t i1;
+    CHECK(db_issue_create(p.id, "Login broken", "steps...", &i1) == true);
+    CHECK(i1.issue_number == 1);
+    CHECK(i1.status == STATUS_OPEN);
+    issue_t i2;
+    db_issue_create(p.id, "Second", "", &i2);
+    CHECK(i2.issue_number == 2);              // numbering is per project, from MAX+1
+
+    CHECK(db_issue_set_status(i1.id, STATUS_CLOSED) == true);
+    issue_t got; db_issue_find_by_id(i1.id, &got);
+    CHECK(got.status == STATUS_CLOSED);
+
+    CHECK(db_issue_assign_label(i1.id, lb.id) == true);
+    CHECK(db_issue_assign_label(i1.id, lb.id) == true);   // idempotent, no duplicate row
+    db_issue_find_by_id(i1.id, &got);
+    CHECK(got.label_count == 1);
+    CHECK_STR(got.label_ids[0], lb.id);
+
+    CHECK(db_issue_assign_user(i1.id, u1.id) == true);
+    db_issue_find_by_id(i1.id, &got);
+    CHECK(got.assignee_count == 1);
+
+    issue_t *il = NULL; int in = db_issue_list_by_project(p.id, &il);
+    CHECK(in == 2); free(il);
+
     db_shutdown();
     return TEST_SUMMARY();
 }

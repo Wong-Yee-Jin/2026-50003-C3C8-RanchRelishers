@@ -331,3 +331,153 @@ bool db_user_upsert_github(long long github_id, const char *username,
     if (!ok) return false;
     return db_user_find_by_github_id(github_id, out);
 }
+
+/* ---- Issue Management ---- */
+
+/* Read the six scalar columns of an issue row. Label and assignee arrays are
+   left empty here because list views do not need them and filling them would
+   cost a follow-up query per row. */
+static void issue_read_scalar(sqlite3_stmt *st, issue_t *out) {
+    memset(out, 0, sizeof(*out));
+    snprintf(out->id, sizeof(out->id), "%s", sqlite3_column_text(st, 0));
+    snprintf(out->project_id, sizeof(out->project_id), "%s", sqlite3_column_text(st, 1));
+    out->issue_number = sqlite3_column_int(st, 2);
+    snprintf(out->title, sizeof(out->title), "%s", sqlite3_column_text(st, 3));
+    const unsigned char *d = sqlite3_column_text(st, 4);
+    snprintf(out->description, sizeof(out->description), "%s", d ? (const char *)d : "");
+    out->status = (issue_status_t)sqlite3_column_int(st, 5);
+}
+
+bool db_issue_create(const char *project_id, const char *title,
+                     const char *description, issue_t *out) {
+    memset(out, 0, sizeof(*out));
+
+    /* Issue numbers run per project from MAX+1 so each project counts from 1
+       the way a user reading the menu expects. */
+    int number = 1;
+    sqlite3_stmt *cst;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT COALESCE(MAX(issue_number),0)+1 FROM issues WHERE project_id=?",
+            -1, &cst, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(cst, 1, project_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(cst) == SQLITE_ROW) number = sqlite3_column_int(cst, 0);
+    sqlite3_finalize(cst);
+
+    if (!id_generate(out->id)) return false;
+    snprintf(out->project_id, sizeof(out->project_id), "%s", project_id);
+    out->issue_number = number;
+    snprintf(out->title, sizeof(out->title), "%s", title);
+    snprintf(out->description, sizeof(out->description), "%s", description ? description : "");
+    out->status = STATUS_OPEN;
+    out->label_count = 0;
+    out->assignee_count = 0;
+
+    sqlite3_stmt *st;
+    const char *sql = "INSERT INTO issues(id, project_id, issue_number, title, description, status)"
+                      " VALUES(?, ?, ?, ?, ?, 0)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, out->id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, out->project_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 3, out->issue_number);
+    sqlite3_bind_text(st, 4, out->title, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 5, out->description, -1, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool db_issue_find_by_id(const char *id, issue_t *out) {
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, project_id, issue_number, title, description, status"
+            " FROM issues WHERE id=?", -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) { issue_read_scalar(st, out); found = true; }
+    sqlite3_finalize(st);
+    if (!found) return false;
+
+    sqlite3_stmt *ls;
+    if (sqlite3_prepare_v2(DB, "SELECT label_id FROM issue_labels WHERE issue_id=?",
+                           -1, &ls, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(ls, 1, id, -1, SQLITE_STATIC);
+        while (out->label_count < MAX_LABELS && sqlite3_step(ls) == SQLITE_ROW) {
+            snprintf(out->label_ids[out->label_count], ID_LEN, "%s", sqlite3_column_text(ls, 0));
+            out->label_count++;
+        }
+        sqlite3_finalize(ls);
+    }
+
+    sqlite3_stmt *as;
+    if (sqlite3_prepare_v2(DB, "SELECT user_id FROM issue_assignees WHERE issue_id=?",
+                           -1, &as, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(as, 1, id, -1, SQLITE_STATIC);
+        while (out->assignee_count < MAX_ASSIGNEES && sqlite3_step(as) == SQLITE_ROW) {
+            snprintf(out->assignee_ids[out->assignee_count], ID_LEN, "%s", sqlite3_column_text(as, 0));
+            out->assignee_count++;
+        }
+        sqlite3_finalize(as);
+    }
+    return true;
+}
+
+bool db_issue_set_status(const char *id, issue_status_t new_status) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB, "UPDATE issues SET status=? WHERE id=?", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int(st, 1, (int)new_status);
+    sqlite3_bind_text(st, 2, id, -1, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+int db_issue_list_by_project(const char *project_id, issue_t **out_list) {
+    *out_list = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, project_id, issue_number, title, description, status"
+            " FROM issues WHERE project_id=? ORDER BY issue_number",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, project_id, -1, SQLITE_STATIC);
+    int cap = 0, n = 0;
+    issue_t *arr = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 8;
+            issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
+            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            arr = tmp; cap = ncap;
+        }
+        issue_read_scalar(st, &arr[n]);
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out_list = arr;
+    return n;
+}
+
+bool db_issue_assign_label(const char *issue_id, const char *label_id) {
+    sqlite3_stmt *st;
+    /* OR IGNORE turns a repeat assignment into a no-op instead of a constraint
+       error, so the menu can call assign without first checking. */
+    const char *sql = "INSERT OR IGNORE INTO issue_labels(issue_id, label_id) VALUES(?, ?)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, issue_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, label_id, -1, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool db_issue_assign_user(const char *issue_id, const char *user_id) {
+    sqlite3_stmt *st;
+    const char *sql = "INSERT OR IGNORE INTO issue_assignees(issue_id, user_id) VALUES(?, ?)";
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, issue_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, user_id, -1, SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
