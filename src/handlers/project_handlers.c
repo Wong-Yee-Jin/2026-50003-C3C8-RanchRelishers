@@ -37,7 +37,7 @@ static void handle_create_project(const http_request_t *req, http_response_t *re
     htttp_form_get(req->body, "name", name, sizeof(name));
 
     project_t out;
-    if (!db_project_create(name, &out)) {
+    if (!db_project_create(cur.id, name, &out)) {
         /* Alternative Flow: Invalid Project Name (empty or duplicate) */
         app_shell_opts_t opts = {0};
         opts.banner_html = "<div class='error'>Invalid project name: it may be "

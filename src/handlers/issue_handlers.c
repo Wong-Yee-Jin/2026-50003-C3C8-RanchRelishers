@@ -7,6 +7,7 @@
 #include "db.h"
 #include "models.h"
 #include "auth.h"
+#include "form_util.h"
 
 static void format_issue_label(const issue_t *iss, char *out, size_t outlen) {
     snprintf(out, outlen, "#%d %s", iss->issue_number, iss->title);
@@ -53,7 +54,10 @@ static void handle_project_issues(const http_request_t *req, http_response_t *re
 
     const char *project_id = path_param_get(params, "id");
     project_t proj;
-    if (!db_project_find_by_id(project_id, &proj)) {
+    if (!db_project_find_by_id(project_id, &proj) || strcmp(proj.owner_id, cur.id) != 0) {
+        /* Either the project doesn't exist, or it belongs to a different
+         * account -- treat both the same so we don't leak which project
+         * ids exist for other users. */
         http_response_html(resp, 404, "<h1>Project not found</h1>");
         return;
     }
@@ -75,6 +79,29 @@ static void handle_project_issues(const http_request_t *req, http_response_t *re
             free(page);
             return;
         }
+
+        /* Apply any Label(s) / Assigned-to picked in the Add Issue modal. */
+        char label_ids[MAX_LABELS][ID_LEN];
+        int label_n = form_get_all(req->body, "label_id", label_ids, MAX_LABELS);
+        for (int i = 0; i < label_n; i++) {
+            label_t lbl;
+            if (label_ids[i][0] && db_label_find_by_id(label_ids[i], &lbl)) {
+                db_issue_assign_label(out.id, label_ids[i]);
+            }
+        }
+
+        char user_ids[MAX_ASSIGNEES][ID_LEN];
+        int user_n = form_get_all(req->body, "user_id", user_ids, MAX_ASSIGNEES);
+        for (int i = 0; i < user_n; i++) {
+            user_t u;
+            /* Only this account's own contributors can be assigned, even if
+             * someone crafts a request with another account's user id. */
+            if (user_ids[i][0] && db_user_find_by_id(user_ids[i], &u) &&
+                strcmp(u.owner_id, cur.id) == 0) {
+                db_issue_assign_user(out.id, user_ids[i]);
+            }
+        }
+
         char redirect[128];
         snprintf(redirect, sizeof(redirect), "/projects/%s/issues", project_id);
         http_response_redirect(resp, redirect);
@@ -99,21 +126,16 @@ static void handle_project_issues(const http_request_t *req, http_response_t *re
     sb_free(&rows);
 }
 
-static int id_in_list(const char (*ids)[ID_LEN], int count, const char *id) {
-    for (int i = 0; i < count; i++)
-        if (strcmp(ids[i], id) == 0) return 1;
-    return 0;
-}
-
 /* ---- UC4: View Issue (details, labels, assignees, time tracking, comments) ----
  * Renders into col3 of the app shell, alongside col1 (projects) and
  * col2 (this issue's project's issue list). Matches the drilldown in
  * the reference screens: "Issue #N" heading, Status, plain
  * "Issue Title:" / "Description:" / "Label(s):" / "Assigned to:"
- * fields, then a full-width Close/Reopen button. Everything below
- * that (label/assignee pickers, time tracking, comments) is extra
- * functionality this app already had, kept but tucked further down
- * the same column. */
+ * fields, then a full-width Close/Reopen button (purple once reopened).
+ * Labels and assignees are set from the Add Issue modal at creation
+ * time; this column just displays them read-only. Time tracking and
+ * comments (extra functionality this app already had) are still
+ * further down the same column. */
 static void handle_view_issue(const http_request_t *req, http_response_t *resp, const path_params_t *params) {
     (void)req;
 
@@ -132,7 +154,7 @@ static void handle_view_issue(const http_request_t *req, http_response_t *resp, 
     }
 
     project_t proj;
-    if (!db_project_find_by_id(iss.project_id, &proj)) {
+    if (!db_project_find_by_id(iss.project_id, &proj) || strcmp(proj.owner_id, cur.id) != 0) {
         http_response_html(resp, 404, "<h1>Project not found</h1>");
         return;
     }
@@ -196,92 +218,8 @@ static void handle_view_issue(const http_request_t *req, http_response_t *resp, 
     if (iss.status == STATUS_OPEN) {
         sb_append(&sb, "/close'><button class='btn-wide' type='submit'>Close Issue</button></form>");
     } else {
-        sb_append(&sb, "/reopen'><button class='btn-wide' type='submit'>Reopen Issue</button></form>");
+        sb_append(&sb, "/reopen'><button class='btn-wide btn-purple' type='submit'>Reopen Issue</button></form>");
     }
-
-    /* TO BE REMOVED: time tracking summary */
-    {
-        char est_buf[32], logged_buf[32];
-        time_format_minutes(iss.estimate_minutes, est_buf, sizeof(est_buf));
-        time_format_minutes(iss.logged_minutes, logged_buf, sizeof(logged_buf));
-        sb_append(&sb, "<p class='muted'>Estimate: ");
-        sb_append_escaped(&sb, est_buf);
-        sb_append(&sb, " &middot; Logged: ");
-        sb_append_escaped(&sb, logged_buf);
-        sb_append(&sb, "</p>");
-    }
-
-    /* Assign label(s) */
-    label_t *labels; int ln = db_label_list(&labels);
-    sb_append(&sb, "<h3>Assign Labels</h3><form method='POST' action='/issues/");
-    sb_append_escaped(&sb, issue_id);
-    sb_append(&sb, "/labels'>");
-    for (int i = 0; i < ln; i++) {
-        int checked = id_in_list(iss.label_ids, iss.label_count, labels[i].id);
-        sb_append(&sb, "<label style='display:inline-block;margin:0 .6rem .4rem 0'>"
-                        "<input type='checkbox' name='label_id' value='");
-        sb_append_escaped(&sb, labels[i].id);
-        sb_append(&sb, "'");
-        if (checked) sb_append(&sb, " checked disabled");
-        sb_append(&sb, "> ");
-        sb_append_escaped(&sb, labels[i].name);
-        sb_append(&sb, "</label>");
-    }
-    free(labels);
-    sb_append(&sb, "<br><button type='submit'>Assign Selected</button></form>");
-
-    /* Assign assignee(s) */
-    user_t *users; int un = db_user_list(&users);
-    sb_append(&sb, "<h3>Assign To</h3>");
-    if (un == 0) {
-        sb_append(&sb, "<p>No users yet -- <a href='/users'>add one</a> first.</p>");
-    } else {
-        sb_append(&sb, "<form method='POST' action='/issues/");
-        sb_append_escaped(&sb, issue_id);
-        sb_append(&sb, "/assignees'>");
-        for (int i = 0; i < un; i++) {
-            int checked = id_in_list(iss.assignee_ids, iss.assignee_count, users[i].id);
-            sb_append(&sb, "<label style='display:inline-block;margin:0 .6rem .4rem 0'>"
-                            "<input type='checkbox' name='user_id' value='");
-            sb_append_escaped(&sb, users[i].id);
-            sb_append(&sb, "'");
-            if (checked) sb_append(&sb, " checked disabled");
-            sb_append(&sb, "> @");
-            sb_append_escaped(&sb, users[i].username);
-            sb_append(&sb, "</label>");
-        }
-        sb_append(&sb, "<br><button type='submit'>Assign Selected</button></form>");
-    }
-    free(users);
-
-    /* TO BE REMOVED: set estimate / log time */
-    sb_append(&sb, "<h3>Time Tracking</h3>"
-                    "<form class='inline' method='POST' action='/issues/");
-    sb_append_escaped(&sb, issue_id);
-    sb_append(&sb, "/estimate'><input name='estimate' placeholder=\"estimate, e.g. '2h 30m'\" "
-                    "style='width:auto;display:inline-block'>"
-                    "<button type='submit'>Set Estimate</button></form> "
-                    "<form class='inline' method='POST' action='/issues/");
-    sb_append_escaped(&sb, issue_id);
-    sb_append(&sb, "/log'><input name='duration' placeholder=\"log time, e.g. '45m'\" "
-                    "style='width:auto;display:inline-block'>"
-                    "<button type='submit'>Log Time</button></form>");
-
-    /* TO BE REMOVED: comments */
-    comment_t *comments; int cn = db_comment_list_by_issue(issue_id, &comments);
-    sb_append(&sb, "<h3>Comments</h3>");
-    if (cn == 0) sb_append(&sb, "<p>No comments yet.</p>");
-    for (int i = 0; i < cn; i++) {
-        sb_append(&sb, "<div class='card'>");
-        sb_append_escaped(&sb, comments[i].text);
-        sb_append(&sb, "</div>");
-    }
-    free(comments);
-
-    sb_append(&sb, "<form method='POST' action='/issues/");
-    sb_append_escaped(&sb, issue_id);
-    sb_append(&sb, "/comments'><textarea name='text' placeholder='Add a comment' required></textarea>"
-                    "<button type='submit'>Comment</button></form>");
 
     sb_t rows; sb_init(&rows);
     {

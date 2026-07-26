@@ -5,7 +5,6 @@
 #define NAME_LEN 128
 #define TITLE_LEN 256
 #define DESC_LEN 2048
-#define COMMENT_LEN 1024
 #define STATUS_LEN 8
 #define MAX_LABELS 16
 #define LABEL_DESC_LEN 160
@@ -19,6 +18,7 @@ typedef enum { STATUS_OPEN, STATUS_CLOSED } issue_status_t;
 typedef struct {
     char id[ID_LEN];
     char name[NAME_LEN];
+    char owner_id[ID_LEN]; /* id of the user who owns/created this project */
 } project_t;
 
 typedef struct {
@@ -29,15 +29,12 @@ typedef struct {
 
 typedef struct {
     char id[ID_LEN];
-    char text[COMMENT_LEN];
-} comment_t;
-
-typedef struct {
-    char id[ID_LEN];
     char username[USERNAME_LEN];
     char display_name[DISPLAY_NAME_LEN];
     char avatar_url[AVATAR_URL_LEN];
     long long github_id;
+    char owner_id[ID_LEN]; /* account whose contributor roster this entry belongs to
+                             * (self-referential for accounts that signed in themselves) */
 } user_t;
 
 typedef struct {
@@ -51,8 +48,6 @@ typedef struct {
     int  label_count;
     char assignee_ids[MAX_ASSIGNEES][ID_LEN];
     int  assignee_count;
-    int  estimate_minutes;
-    int  logged_minutes;
 } issue_t;
 
 #endif
