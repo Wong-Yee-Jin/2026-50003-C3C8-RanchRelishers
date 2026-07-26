@@ -357,18 +357,33 @@ static void screen_labels(void) {
     }
 }
 
-/* Users only ever get in through GitHub login (M4), so this screen is
-   read-only for now, there is no user_service_create to call. */
+/* Same shape as screen_labels: list what's there, then let a signed-in user
+   add to it. Local creation is the only way into the assignee list without
+   a network, since GitHub login has nothing to authenticate against offline. */
 static void screen_assignees(void) {
-    user_t *users = NULL;
-    int n = user_service_list(&users);
-    screen_header("Assignees");
-    if (n == 0) printf("(no users yet)\n");
-    for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
-    free(users);
-    printf("0) back\n> ");
-    char line[16];
-    read_line(line, sizeof(line));
+    char line[NAME_LEN];
+    for (;;) {
+        user_t *users = NULL;
+        int n = user_service_list(&users);
+        screen_header("Assignees");
+        if (n == 0) printf("(no users yet)\n");
+        for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
+        free(users);
+        printf("  c) create   0) back\n> ");
+        if (!read_line(line, sizeof(line))) return;
+
+        if (line[0] == 'c' || line[0] == 'C') {
+            char username[USERNAME_LEN];
+            printf("username: ");
+            if (!read_line(username, sizeof(username))) return;
+            user_t created;
+            print_result(user_service_create(username, &created), "name taken or empty");
+        } else if (ui_parse_choice(line) == 0) {
+            return;
+        } else {
+            printf("unknown choice\n");
+        }
+    }
 }
 
 /* Tracks the GitHub username for the current process, empty when the signed

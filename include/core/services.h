@@ -41,8 +41,11 @@ svc_result_t label_service_create(const char *name, const char *desc, label_t *o
 int          label_service_list(label_t **out);
 
 /* ---- Users ----
-   User records come from the GitHub login flow, not from this service, so
-   both calls here are plain reads with no auth gate. */
+   Most users arrive through the GitHub login flow, but without a network
+   the assignee list needs another way in: create adds a local-only user,
+   guarded by auth and a uniqueness check like the other writes here. list
+   and get stay plain reads with no auth gate. */
+svc_result_t user_service_create(const char *username, user_t *out);
 int          user_service_list(user_t **out);
 svc_result_t user_service_get(const char *id, user_t *out);
 
