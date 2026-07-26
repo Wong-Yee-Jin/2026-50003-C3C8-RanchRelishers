@@ -49,23 +49,22 @@ void sb_append_escaped(sb_t *sb, const char *text) {
 }
 
 /*
- * Dark theme shared by every page: a fixed sidebar (logo, nav, and the
- * signed-in user's menu) plus a main area. 
- * render_page() puts a single scrolling column in that main area; 
+ * Dark theme shared by every page: a fixed sidebar (logo, nav, and the signed-in user's menu) plus a main area. 
+ * render_page() puts a single scrolling column in that main area;
  * render_app_shell() splits it into the three-column projects/issues/issue-detail layout instead.
  * Both share PAGE_CSS so the two never drift apart visually.
  */
 static const char *PAGE_CSS =
     "*{box-sizing:border-box}"
-    "html,body{height:100%;margin:0}"
+    "html,body{width:100%; height:100%; margin:0; overflow:hidden;}"
     "body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;"
     "background:#1b1e27;color:#e6e9ef}"
     "a{color:inherit;text-decoration:none}"
     "h1{margin:0 0 1rem;font-size:1.4rem}"
     "h3{font-size:1rem;color:#c7ccd6;margin:1.5rem 0 .5rem}"
-    ".app{display:flex;min-height:100vh}"
+    ".app{display:flex;width:100vw;height:100vh;overflow:hidden}"
     /* ---- sidebar ---- */
-    ".sidebar{width:230px;flex-shrink:0;background:#1b1e27;"
+    ".sidebar{width:clamp(180px,18vw,230px);flex-shrink:0;background:#1b1e27;"
     "border-right:1px solid #2a2e3a;display:flex;flex-direction:column;"
     "padding:1.25rem 0}"
     ".brand{display:flex;align-items:center;gap:.6rem;padding:0 1.25rem 1.5rem;"
@@ -102,32 +101,65 @@ static const char *PAGE_CSS =
     "border:1px solid #3a3f4d;border-radius:6px;font-weight:600;font-size:.88rem}"
     /* ---- main area ---- */
     ".main{flex:1;display:flex;flex-direction:column;min-width:0}"
-    ".topbar{display:flex;align-items:center;gap:.75rem;padding:1rem 1.5rem;"
+    ".topbar{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;padding:1rem 1.5rem;"
     "border-bottom:1px solid #2a2e3a}"
     ".topbar .grow{flex:1;display:flex;gap:.75rem}"
-    ".search-input{width:100%;max-width:320px;background:#242832;"
+    ".search-input{flex:1;min-width:120px;max-width:350px;background:#242832;"
     "border:1px solid #343a48;color:#e6e9ef;border-radius:6px;padding:.5rem .8rem;"
     "font-size:.88rem}"
     ".search-input::placeholder{color:#767c8a}"
     ".btn-add{background:#3fb950;color:#0b1f10;border:none;border-radius:6px;"
     "padding:.55rem 1rem;font-weight:700;font-size:.88rem;cursor:pointer;"
-    "list-style:none;white-space:nowrap}"
-    ".btn-add::-webkit-details-marker{display:none}"
-    ".add-menu{position:relative}"
-    ".add-menu .panel{position:absolute;right:0;top:calc(100% + 6px);width:280px;"
-    "background:#242832;border:1px solid #343a48;border-radius:8px;padding:1rem;"
-    "z-index:10;box-shadow:0 8px 24px rgba(0,0,0,.4)}"
-    ".add-menu .panel h4{margin:.2rem 0 .5rem;font-size:.85rem;color:#9aa0ab}"
-    ".add-menu .panel form{margin-bottom:.75rem}"
+    "white-space:nowrap;font-family:inherit}"
     ".single-col{padding:1.5rem}"
+    /* ---- Add Project/Issue modal ---- */
+    ".modal-backdrop{display:none;position:fixed;inset:0;background:rgba(10,12,18,.6);"
+    "z-index:100;align-items:center;justify-content:center}"
+    ".modal-backdrop.open{display:flex}"
+    ".modal{width:440px;max-width:92vw;max-height:85vh;overflow-y:auto;"
+    "background:#454b5c;border-radius:12px;padding:1.5rem;"
+    "box-shadow:0 24px 60px rgba(0,0,0,.5)}"
+    ".modal-tabs{display:flex;gap:.3rem;background:#242832;border-radius:8px;"
+    "padding:.3rem;width:fit-content;margin:0 auto 1.5rem}"
+    ".modal-tab{padding:.5rem 1.1rem;border-radius:6px;font-size:.85rem;"
+    "font-weight:600;color:#c7ccd6;cursor:pointer;background:transparent;"
+    "border:none;font-family:inherit}"
+    ".modal-tab.active{background:#1b1e27;color:#fff}"
+    ".modal-panel{display:none}"
+    ".modal-panel.active{display:block}"
+    ".modal-field{margin-bottom:1.1rem}"
+    ".modal-field>label{display:block;font-weight:700;margin-bottom:.5rem;font-size:.95rem}"
+    ".modal-field input,.modal-field textarea{margin:0}"
+    ".modal-actions{display:flex;justify-content:flex-end;margin-top:.5rem}"
+    ".modal-actions button{padding:.6rem 1.3rem}"
+    /* multi-select dropdown fields (Label(s) / Assigned to) */
+    ".ms-field{position:relative}"
+    ".ms-box{min-height:2.5rem;background:#20242e;border:1px solid #343a48;"
+    "border-radius:6px;padding:.4rem .7rem;display:flex;flex-wrap:wrap;"
+    "align-items:center;gap:.35rem;cursor:pointer}"
+    ".ms-placeholder{color:#767c8a;font-size:.88rem}"
+    ".ms-chip{background:#2f3542;color:#e6e9ef;border-radius:4px;"
+    "padding:.2rem .55rem;font-size:.8rem;display:flex;align-items:center;gap:.35rem}"
+    ".ms-chip .x{cursor:pointer;color:#9aa0ab;font-weight:700}"
+    ".ms-chip .x:hover{color:#fff}"
+    ".ms-dropdown{display:none;position:absolute;top:calc(100% + 6px);left:0;"
+    "right:0;background:#20242e;border:1px solid #343a48;border-radius:8px;"
+    "padding:.4rem;max-height:200px;overflow-y:auto;z-index:10;"
+    "box-shadow:0 12px 28px rgba(0,0,0,.5)}"
+    ".ms-dropdown.open{display:block}"
+    ".ms-option{display:flex;align-items:center;gap:.55rem;padding:.45rem .5rem;"
+    "border-radius:5px;cursor:pointer;font-size:.85rem;color:#dfe3ea}"
+    ".ms-option:hover{background:#2a2f3b}"
+    ".ms-option input{width:auto;margin:0}"
+    ".ms-empty{padding:.5rem;color:#767c8a;font-size:.82rem}"
     /* ---- three column layout ---- */
     ".columns{flex:1;display:flex;min-height:0;overflow:hidden}"
     ".col{overflow-y:auto}"
-    ".col1{width:300px;flex-shrink:0;border-right:1px solid #2a2e3a}"
-    ".col2{width:320px;flex-shrink:0;border-right:1px solid #2a2e3a}"
-    ".col3{flex:1;padding:1.5rem}"
+    ".col1{flex:1 1 0;min-width:220px;border-right:1px solid #2a2e3a}"
+    ".col2{flex:1 1 0;min-width:240px;border-right:1px solid #2a2e3a}"
+    ".col3{flex:1 1 0;min-width:320px;overflow-y:auto;padding:1.5rem;}"
     ".col-header{padding:.9rem 1rem}"
-    ".row{display:flex;align-items:center;justify-content:space-between;"
+    ".row{display:flex;align-items:center;justify-content:space-between;min-width:0;"
     "gap:.5rem;padding:.75rem 1.1rem;color:#dfe3ea;font-size:.92rem;"
     "border-left:2px solid transparent}"
     ".row:hover{background:#20242e}"
@@ -155,16 +187,33 @@ static const char *PAGE_CSS =
     ".field-label{font-weight:700;margin-top:1.1rem}"
     ".card{border:1px solid #2a2e3a;border-radius:6px;padding:.75rem 1rem;"
     "margin:.5rem 0;background:#20242e}"
-    "input,textarea,select{width:100%;padding:.5rem .7rem;margin:.3rem 0 .8rem;"
+    "input,textarea,select{width:100%; max-width:100%; padding:.5rem .7rem;margin:.3rem 0 .8rem;"
     "background:#20242e;border:1px solid #343a48;color:#e6e9ef;border-radius:6px;"
     "box-sizing:border-box;font-family:inherit}"
     "button{background:#3fb950;color:#0b1f10;border:none;padding:.55rem 1rem;"
     "border-radius:6px;cursor:pointer;font-weight:700}"
     "button.secondary{background:#2f3542;color:#e6e9ef}"
+    "button.btn-purple{background:#a371f7;color:#1b1039}"
     "form.inline{display:inline}"
-    ".btn-wide{display:block;width:100%;text-align:center;margin-top:1rem}"
-    ".label-pick,.assignee-pick{display:inline-block;margin:0 .6rem .5rem 0;"
-    "font-size:.85rem;color:#c7ccd6}";
+    ".btn-wide{display:block;width:100%; text-align:center;margin-top:1rem}"
+    /* Checkbox pickers (issue detail: Assign Labels / Assign To) -- a
+     * grid of equal-width cells, checkbox centered above its text, so a
+     * long catalog wraps into neat columns instead of one ragged line. */
+    ".picker-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));"
+    "gap:.9rem .6rem;margin:.6rem 0 .9rem}"
+    ".picker-item{display:flex;flex-direction:column;align-items:center;gap:.4rem;"
+    "font-size:.82rem;color:#c7ccd6;text-align:center;cursor:pointer}"
+    ".picker-item input{width:auto;margin:0}"
+    /* GitHub-username autocomplete (Users page: Add User) */
+    ".gh-userpick{position:relative;max-width:420px}"
+    ".gh-dropdown{display:none;position:absolute;top:calc(100% - .6rem);left:0;right:0;"
+    "background:#0d1117;border:1px solid #30363d;border-radius:8px;"
+    "box-shadow:0 12px 28px rgba(0,0,0,.55);z-index:20;max-height:280px;overflow-y:auto}"
+    ".gh-result{display:flex;align-items:center;gap:.7rem;padding:.55rem .8rem;cursor:pointer}"
+    ".gh-result:hover{background:#161b22}"
+    ".gh-result img{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#30363d}"
+    ".gh-result b{display:block;font-size:.87rem;color:#e6e9ef;font-weight:600}"
+    ".gh-result small{display:block;font-size:.76rem;color:#8b949e}";
 
 static const char *ICON_MONITOR =
     "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' "
@@ -261,7 +310,7 @@ char *render_landing_page(void) {
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<title>Mini Issue Tracker</title><style>"
-        "*{box-sizing:border-box}html,body{height:100%;margin:0}"
+        "*{box-sizing:border-box}html,body{width:100%; height:100%; margin:0; overflow:hidden;}"
         "body{font-family:-apple-system,'Segoe UI',Arial,sans-serif;background:#1b1e27;"
         "color:#e6e9ef;display:flex;flex-direction:column}"
         ".ltop{display:flex;align-items:center;justify-content:space-between;"
@@ -308,9 +357,54 @@ char *render_landing_page(void) {
     return result;
 }
 
+/* Checkbox options inside the Add-Issue modal's "Label(s)" dropdown.
+ * data-chip carries the display text the JS uses to render the chip
+ * once an option is checked. */
+static void append_label_ms_options(sb_t *sb) {
+    label_t *labels; int ln = db_label_list(&labels);
+    if (ln == 0) {
+        sb_append(sb, "<div class='ms-empty'>No labels yet.</div>");
+    } else {
+        for (int i = 0; i < ln; i++) {
+            sb_append(sb, "<label class='ms-option'><input type='checkbox' name='label_id' value='");
+            sb_append_escaped(sb, labels[i].id);
+            sb_append(sb, "' data-chip='");
+            sb_append_escaped(sb, labels[i].name);
+            sb_append(sb, "'><span>");
+            sb_append_escaped(sb, labels[i].name);
+            sb_append(sb, "</span></label>");
+        }
+    }
+    free(labels);
+}
+
+/* Same for "Assigned to", scoped to this account's own contributor roster. */
+static void append_user_ms_options(sb_t *sb, const char *owner_id) {
+    user_t *users; int un = db_user_list(owner_id, &users);
+    if (un == 0) {
+        sb_append(sb, "<div class='ms-empty'>No contributors yet.</div>");
+    } else {
+        for (int i = 0; i < un; i++) {
+            char chip[USERNAME_LEN + 2];
+            snprintf(chip, sizeof(chip), "@%s", users[i].username);
+            sb_append(sb, "<label class='ms-option'><input type='checkbox' name='user_id' value='");
+            sb_append_escaped(sb, users[i].id);
+            sb_append(sb, "' data-chip='");
+            sb_append_escaped(sb, chip);
+            sb_append(sb, "'><span>");
+            sb_append_escaped(sb, chip);
+            sb_append(sb, "</span></label>");
+        }
+    }
+    free(users);
+}
+
 char *render_app_shell(const char *page_title, const app_shell_opts_t *opts) {
     sb_t sb; sb_init(&sb);
     append_sidebar(&sb);
+
+    user_t owner;
+    int have_owner = auth_get_current_user(&owner);
 
     sb_append(&sb, "<div class='main'><div class='topbar'><div class='grow'>"
                     "<input id='project-search' class='search-input' "
@@ -321,20 +415,57 @@ char *render_app_shell(const char *page_title, const app_shell_opts_t *opts) {
     }
     sb_append(&sb, "</div>");
 
-    /* +Add Project/Issue dropdown */
-    sb_append(&sb, "<details class='add-menu'><summary class='btn-add'>"
-                    "+ Add Project/Issue</summary><div class='panel'>");
-    sb_append(&sb, "<h4>New project</h4><form method='POST' action='/projects'>"
-                    "<input name='name' placeholder='Project name' required>"
-                    "<button type='submit'>Create Project</button></form>");
+    sb_append(&sb, "<button type='button' class='btn-add' id='add-modal-open'>"
+                    "+ Add Project/Issue</button>");
+    sb_append(&sb, "</div>"); /* .topbar */
+
+    /* Add Project / Add Issue modal, hidden until the button above opens it */
+    sb_append(&sb, "<div class='modal-backdrop' id='add-modal-backdrop'><div class='modal'>"
+                    "<div class='modal-tabs'>"
+                    "<button type='button' class='modal-tab active' data-tab='project'>Add Project</button>"
+                    "<button type='button' class='modal-tab' data-tab='issue'>Add Issue</button>"
+                    "</div>");
+
+    sb_append(&sb, "<div class='modal-panel active' data-panel='project'>"
+                    "<form method='POST' action='/projects'>"
+                    "<div class='modal-field'><label>Project Name</label>"
+                    "<input type='text' name='name' required></div>"
+                    "<div class='modal-actions'><button type='submit'>+ Add Project</button></div>"
+                    "</form></div>");
+
+    sb_append(&sb, "<div class='modal-panel' data-panel='issue'>");
     if (opts->active_project_id) {
-        sb_append(&sb, "<h4>New issue in this project</h4><form method='POST' action='/projects/");
+        sb_append(&sb, "<form method='POST' action='/projects/");
         sb_append_escaped(&sb, opts->active_project_id);
-        sb_append(&sb, "/issues'><input name='title' placeholder='Issue title' required>"
-                        "<textarea name='description' placeholder='Description'></textarea>"
-                        "<button type='submit'>Create Issue</button></form>");
+        sb_append(&sb, "/issues'>"
+                        "<div class='modal-field'><label>Issue Title</label>"
+                        "<input type='text' name='title' required></div>"
+                        "<div class='modal-field'><label>Issue Description</label>"
+                        "<textarea name='description' rows='3'></textarea></div>");
+
+        sb_append(&sb, "<div class='modal-field'><label>Label(s)</label>"
+                        "<div class='ms-field'><div class='ms-box'>"
+                        "<span class='ms-placeholder'>Select label(s)</span></div>"
+                        "<div class='ms-dropdown'>");
+        append_label_ms_options(&sb);
+        sb_append(&sb, "</div></div></div>");
+
+        sb_append(&sb, "<div class='modal-field'><label>Assigned to</label>"
+                        "<div class='ms-field'><div class='ms-box'>"
+                        "<span class='ms-placeholder'>Select assignee(s)</span></div>"
+                        "<div class='ms-dropdown'>");
+        if (have_owner) append_user_ms_options(&sb, owner.id);
+        else sb_append(&sb, "<div class='ms-empty'>Sign in first.</div>");
+        sb_append(&sb, "</div></div></div>");
+
+        sb_append(&sb, "<div class='modal-actions'><button type='submit'>+ Add Issue</button></div>"
+                        "</form>");
+    } else {
+        sb_append(&sb, "<p class='muted'>Select a project first to add an issue to it.</p>");
     }
-    sb_append(&sb, "</div></details></div>");
+    sb_append(&sb, "</div>"); /* .modal-panel[data-panel=issue] */
+
+    sb_append(&sb, "</div></div>"); /* .modal, .modal-backdrop */
 
     if (opts->banner_html && opts->banner_html[0]) {
         sb_append(&sb, "<div style='padding:1rem 1.5rem 0'>");
@@ -348,7 +479,10 @@ char *render_app_shell(const char *page_title, const app_shell_opts_t *opts) {
     /* col1: projects */
     sb_append(&sb, "<div class='col col1'><div class='list'>");
     {
-        project_t *list; int n = db_project_list(&list);
+        project_t *list = NULL; int n = 0;
+        if (have_owner) {
+            n = db_project_list(owner.id, &list);
+        }
         if (n == 0) {
             sb_append(&sb, "<p class='empty-hint'>No projects exist yet.</p>");
         } else {
@@ -417,6 +551,63 @@ char *render_app_shell(const char *page_title, const app_shell_opts_t *opts) {
         "});});}"
         "mgitFilter('project-search','.proj-row');"
         "mgitFilter('issue-search','.issue-row');"
+
+        /* ---- Add Project/Issue modal ---- */
+        "(function(){"
+        "var openBtn=document.getElementById('add-modal-open');"
+        "var backdrop=document.getElementById('add-modal-backdrop');"
+        "if(!openBtn||!backdrop)return;"
+        "openBtn.addEventListener('click',function(){backdrop.classList.add('open');});"
+        "backdrop.addEventListener('click',function(e){"
+        "if(e.target===backdrop)backdrop.classList.remove('open');});"
+        "document.addEventListener('keydown',function(e){"
+        "if(e.key==='Escape')backdrop.classList.remove('open');});"
+
+        "var tabs=backdrop.querySelectorAll('.modal-tab');"
+        "tabs.forEach(function(tab){"
+        "tab.addEventListener('click',function(){"
+        "tabs.forEach(function(t){t.classList.remove('active');});"
+        "tab.classList.add('active');"
+        "backdrop.querySelectorAll('.modal-panel').forEach(function(p){"
+        "p.classList.toggle('active',p.getAttribute('data-panel')===tab.getAttribute('data-tab'));"
+        "});});});"
+        "})();"
+
+        /* ---- generic multiselect: click box to open/close, checkboxes drive chips ---- */
+        "(function(){"
+        "function refreshChips(field){"
+        "var box=field.querySelector('.ms-box');"
+        "var boxes=field.querySelectorAll('input[type=checkbox]:checked');"
+        "box.innerHTML='';"
+        "if(!boxes.length){"
+        "var ph=document.createElement('span');ph.className='ms-placeholder';"
+        "ph.textContent=box.getAttribute('data-placeholder')||'Select...';"
+        "box.appendChild(ph);return;"
+        "}"
+        "boxes.forEach(function(cb){"
+        "var chip=document.createElement('span');chip.className='ms-chip';"
+        "var label=document.createElement('span');label.textContent=cb.getAttribute('data-chip')||cb.value;"
+        "var x=document.createElement('span');x.className='x';x.textContent='\\u00d7';"
+        "x.addEventListener('click',function(e){e.stopPropagation();cb.checked=false;refreshChips(field);});"
+        "chip.appendChild(label);chip.appendChild(x);box.appendChild(chip);"
+        "});}"
+        "document.querySelectorAll('.ms-field').forEach(function(field){"
+        "var box=field.querySelector('.ms-box');"
+        "var dd=field.querySelector('.ms-dropdown');"
+        "box.setAttribute('data-placeholder',box.textContent.trim()||'Select...');"
+        "box.addEventListener('click',function(e){"
+        "e.stopPropagation();"
+        "document.querySelectorAll('.ms-dropdown.open').forEach(function(other){"
+        "if(other!==dd)other.classList.remove('open');});"
+        "dd.classList.toggle('open');});"
+        "dd.addEventListener('change',function(){refreshChips(field);});"
+        "refreshChips(field);"
+        "});"
+        "document.addEventListener('click',function(e){"
+        "document.querySelectorAll('.ms-field').forEach(function(field){"
+        "if(!field.contains(e.target))field.querySelector('.ms-dropdown').classList.remove('open');"
+        "});});"
+        "})();"
         "</script>");
 
     return finish_page(&sb, page_title);

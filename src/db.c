@@ -137,9 +137,6 @@ static void issue_from_bson(const bson_t *doc, issue_t *out) {
 
     out->label_count    = bson_get_oid_array(doc, "label_ids", out->label_ids, MAX_LABELS);
     out->assignee_count = bson_get_oid_array(doc, "assignee_ids", out->assignee_ids, MAX_ASSIGNEES);
-
-    out->estimate_minutes = bson_get_int32(doc, "estimate_minutes", 0);
-    out->logged_minutes   = bson_get_int32(doc, "logged_minutes", 0);
 }
 
 static void user_from_bson(const bson_t *doc, user_t *out) {
@@ -153,6 +150,9 @@ static void user_from_bson(const bson_t *doc, user_t *out) {
     strncpy(out->display_name, bson_get_str(doc, "display_name", ""), DISPLAY_NAME_LEN - 1);
     strncpy(out->avatar_url, bson_get_str(doc, "avatar_url", ""), AVATAR_URL_LEN - 1);
     out->github_id = (long long)bson_get_int64(doc, "github_id", 0);
+
+    if (bson_iter_init_find(&it, doc, "owner_id") && BSON_ITER_HOLDS_OID(&it))
+        oid_to_str(bson_iter_oid(&it), out->owner_id);
 }
 
 /* Atomically increments (creating if needed) the per-project issue
@@ -194,20 +194,25 @@ static int next_issue_number(const bson_oid_t *project_oid) {
 
 /* ---------- Projects ---------- */
 
-bool db_project_name_exists(const char *name) {
-    bson_t *q = BCON_NEW("name", BCON_UTF8(name));
+bool db_project_name_exists(const char *owner_id, const char *name) {
+    bson_oid_t owner_oid;
+    if (!str_to_oid(owner_id, &owner_oid)) return false;
+    bson_t *q = BCON_NEW("owner_id", BCON_OID(&owner_oid), "name", BCON_UTF8(name));
     int64_t n = mongoc_collection_count_documents(g_projects, q, NULL, NULL, NULL, NULL);
     bson_destroy(q);
     return n > 0;
 }
 
-bool db_project_create(const char *name, project_t *out) {
+bool db_project_create(const char *owner_id, const char *name, project_t *out) {
     if (!name || strlen(name) == 0) return false; /* Alternative Flow: invalid name */
-    if (db_project_name_exists(name)) return false;
+    bson_oid_t owner_oid;
+    if (!str_to_oid(owner_id, &owner_oid)) return false; /* Alternative Flow: not signed in */
+    if (db_project_name_exists(owner_id, name)) return false;
 
     bson_oid_t oid;
     bson_oid_init(&oid, NULL);
-    bson_t *doc = BCON_NEW("_id", BCON_OID(&oid), "name", BCON_UTF8(name));
+    bson_t *doc = BCON_NEW("_id", BCON_OID(&oid), "name", BCON_UTF8(name),
+                            "owner_id", BCON_OID(&owner_oid));
 
     bson_error_t error;
     bool ok = mongoc_collection_insert_one(g_projects, doc, NULL, NULL, &error);
@@ -218,11 +223,14 @@ bool db_project_create(const char *name, project_t *out) {
     }
     oid_to_str(&oid, out->id);
     strncpy(out->name, name, NAME_LEN - 1);
+    strncpy(out->owner_id, owner_id, ID_LEN - 1);
     return true;
 }
 
-int db_project_list(project_t **out_list) {
-    bson_t *q = bson_new();
+int db_project_list(const char *owner_id, project_t **out_list) {
+    bson_oid_t owner_oid;
+    if (!str_to_oid(owner_id, &owner_oid)) { *out_list = NULL; return 0; }
+    bson_t *q = BCON_NEW("owner_id", BCON_OID(&owner_oid));
     mongoc_cursor_t *cur = mongoc_collection_find_with_opts(g_projects, q, NULL, NULL);
 
     int cap = 16, n = 0;
@@ -234,6 +242,7 @@ int db_project_list(project_t **out_list) {
         if (bson_iter_init_find(&it, doc, "_id") && BSON_ITER_HOLDS_OID(&it))
             oid_to_str(bson_iter_oid(&it), list[n].id);
         strncpy(list[n].name, bson_get_str(doc, "name", ""), NAME_LEN - 1);
+        strncpy(list[n].owner_id, owner_id, ID_LEN - 1);
         n++;
     }
     mongoc_cursor_destroy(cur);
@@ -252,6 +261,11 @@ bool db_project_find_by_id(const char *id, project_t *out) {
     if (found) {
         strncpy(out->id, id, ID_LEN - 1);
         strncpy(out->name, bson_get_str(doc, "name", ""), NAME_LEN - 1);
+        bson_iter_t it;
+        if (bson_iter_init_find(&it, doc, "owner_id") && BSON_ITER_HOLDS_OID(&it))
+            oid_to_str(bson_iter_oid(&it), out->owner_id);
+        else
+            out->owner_id[0] = '\0';
     }
     mongoc_cursor_destroy(cur);
     bson_destroy(q);
@@ -279,10 +293,7 @@ bool db_issue_create(const char *project_id, const char *title,
         "description", BCON_UTF8(description ? description : ""),
         "status", BCON_UTF8("open"),
         "label_ids", "[", "]",
-        "assignee_ids", "[", "]",
-        "comments", "[", "]",
-        "estimate_minutes", BCON_INT32(0),
-        "logged_minutes", BCON_INT32(0)
+        "assignee_ids", "[", "]"
     );
 
     bson_error_t error;
@@ -331,40 +342,6 @@ bool db_issue_set_status(const char *id, issue_status_t new_status) {
     return ok;
 }
 
-/* ---- TO BE REMOVED: Time tracking ---- */
-
-bool db_issue_set_estimate(const char *id, int minutes) {
-    if (minutes < 0) return false; /* Alternative Flow: invalid duration */
-    bson_oid_t oid;
-    if (!str_to_oid(id, &oid)) return false;
-    bson_t *q = BCON_NEW("_id", BCON_OID(&oid));
-    bson_t *update = BCON_NEW("$set", "{",
-        "estimate_minutes", BCON_INT32(minutes),
-    "}");
-    bson_error_t error;
-    bool ok = mongoc_collection_update_one(g_issues, q, update, NULL, NULL, &error);
-    bson_destroy(q);
-    bson_destroy(update);
-    if (!ok) fprintf(stderr, "[db] set estimate failed: %s\n", error.message);
-    return ok;
-}
-
-bool db_issue_log_time(const char *id, int minutes) {
-    if (minutes <= 0) return false; /* Alternative Flow: invalid/zero duration */
-    bson_oid_t oid;
-    if (!str_to_oid(id, &oid)) return false;
-    bson_t *q = BCON_NEW("_id", BCON_OID(&oid));
-    bson_t *update = BCON_NEW("$inc", "{",
-        "logged_minutes", BCON_INT32(minutes),
-    "}");
-    bson_error_t error;
-    bool ok = mongoc_collection_update_one(g_issues, q, update, NULL, NULL, &error);
-    bson_destroy(q);
-    bson_destroy(update);
-    if (!ok) fprintf(stderr, "[db] log time failed: %s\n", error.message);
-    return ok;
-}
-
 static int issue_query_to_list(bson_t *q, issue_t **out_list) {
     mongoc_cursor_t *cur = mongoc_collection_find_with_opts(g_issues, q, NULL, NULL);
     int cap = 16, n = 0;
@@ -409,72 +386,6 @@ int db_issue_filter(const char *status_filter, const char *label_id_filter, issu
             BSON_APPEND_OID(q, "label_ids", &label_oid); /* matches if array contains it */
     }
     return issue_query_to_list(q, out_list);
-}
-
-/* ---------- Comments (embedded in issue doc) ---------- */
-
-bool db_comment_add(const char *issue_id, const char *text) {
-    if (!text || strlen(text) == 0) return false; /* Alternative Flow: empty comment */
-    bson_oid_t issue_oid;
-    if (!str_to_oid(issue_id, &issue_oid)) return false;
-
-    bson_oid_t comment_oid;
-    bson_oid_init(&comment_oid, NULL);
-
-    bson_t *q = BCON_NEW("_id", BCON_OID(&issue_oid));
-    bson_t *comment = BCON_NEW("_id", BCON_OID(&comment_oid), "text", BCON_UTF8(text));
-    bson_t *update = bson_new();
-    bson_t push_doc, comments_doc;
-    BSON_APPEND_DOCUMENT_BEGIN(update, "$push", &push_doc);
-    BSON_APPEND_DOCUMENT(&push_doc, "comments", comment);
-    bson_append_document_end(update, &push_doc);
-    (void)comments_doc;
-
-    bson_error_t error;
-    bool ok = mongoc_collection_update_one(g_issues, q, update, NULL, NULL, &error);
-    if (!ok) fprintf(stderr, "[db] add comment failed: %s\n", error.message);
-
-    bson_destroy(q);
-    bson_destroy(comment);
-    bson_destroy(update);
-    return ok;
-}
-
-int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
-    bson_oid_t oid;
-    if (!str_to_oid(issue_id, &oid)) { *out_list = NULL; return 0; }
-    bson_t *q = BCON_NEW("_id", BCON_OID(&oid));
-    const bson_t *doc;
-    mongoc_cursor_t *cur = mongoc_collection_find_with_opts(g_issues, q, NULL, NULL);
-
-    int n = 0;
-    comment_t *list = NULL;
-    if (mongoc_cursor_next(cur, &doc)) {
-        bson_iter_t it;
-        if (bson_iter_init_find(&it, doc, "comments") && BSON_ITER_HOLDS_ARRAY(&it)) {
-            bson_iter_t arr_it;
-            bson_iter_recurse(&it, &arr_it);
-            int cap = 8;
-            list = malloc(cap * sizeof(comment_t));
-            while (bson_iter_next(&arr_it)) {
-                if (n == cap) { cap *= 2; list = realloc(list, cap * sizeof(comment_t)); }
-                bson_iter_t sub;
-                bson_iter_recurse(&arr_it, &sub);
-                bson_t sub_doc;
-                uint32_t len; const uint8_t *data;
-                bson_iter_document(&arr_it, &len, &data);
-                bson_init_static(&sub_doc, data, len);
-                if (bson_iter_init_find(&sub, &sub_doc, "_id") && BSON_ITER_HOLDS_OID(&sub))
-                    oid_to_str(bson_iter_oid(&sub), list[n].id);
-                strncpy(list[n].text, bson_get_str(&sub_doc, "text", ""), COMMENT_LEN - 1);
-                n++;
-            }
-        }
-    }
-    mongoc_cursor_destroy(cur);
-    bson_destroy(q);
-    *out_list = list;
-    return n;
 }
 
 /* ---------- Labels ---------- */
@@ -603,20 +514,25 @@ bool db_issue_assign_label(const char *issue_id, const char *label_id) {
 
 /* ---------- Users / Assignees ---------- */
 
-bool db_user_name_exists(const char *username) {
-    bson_t *q = BCON_NEW("username", BCON_UTF8(username));
+bool db_user_name_exists(const char *owner_id, const char *username) {
+    bson_oid_t owner_oid;
+    if (!str_to_oid(owner_id, &owner_oid)) return false;
+    bson_t *q = BCON_NEW("owner_id", BCON_OID(&owner_oid), "username", BCON_UTF8(username));
     int64_t n = mongoc_collection_count_documents(g_users, q, NULL, NULL, NULL, NULL);
     bson_destroy(q);
     return n > 0;
 }
 
-bool db_user_create(const char *username, user_t *out) {
+bool db_user_create(const char *owner_id, const char *username, user_t *out) {
     if (!username || strlen(username) == 0) return false; /* Alt Flow: invalid username */
-    if (db_user_name_exists(username)) return false;       /* Alt Flow: duplicate */
+    bson_oid_t owner_oid;
+    if (!str_to_oid(owner_id, &owner_oid)) return false; /* Alt Flow: not signed in */
+    if (db_user_name_exists(owner_id, username)) return false;       /* Alt Flow: duplicate */
 
     bson_oid_t oid;
     bson_oid_init(&oid, NULL);
-    bson_t *doc = BCON_NEW("_id", BCON_OID(&oid), "username", BCON_UTF8(username));
+    bson_t *doc = BCON_NEW("_id", BCON_OID(&oid), "username", BCON_UTF8(username),
+                            "owner_id", BCON_OID(&owner_oid));
     bson_error_t error;
     bool ok = mongoc_collection_insert_one(g_users, doc, NULL, NULL, &error);
     bson_destroy(doc);
@@ -626,11 +542,14 @@ bool db_user_create(const char *username, user_t *out) {
     }
     oid_to_str(&oid, out->id);
     strncpy(out->username, username, USERNAME_LEN - 1);
+    strncpy(out->owner_id, owner_id, ID_LEN - 1);
     return true;
 }
 
-int db_user_list(user_t **out_list) {
-    bson_t *q = bson_new();
+int db_user_list(const char *owner_id, user_t **out_list) {
+    bson_oid_t owner_oid;
+    if (!str_to_oid(owner_id, &owner_oid)) { *out_list = NULL; return 0; }
+    bson_t *q = BCON_NEW("owner_id", BCON_OID(&owner_oid));
     mongoc_cursor_t *cur = mongoc_collection_find_with_opts(g_users, q, NULL, NULL);
     int cap = 16, n = 0;
     user_t *list = malloc(cap * sizeof(user_t));
@@ -684,13 +603,25 @@ bool db_user_find_by_github_id(long long github_id, user_t *out) {
 bool db_user_upsert_github(long long github_id, const char *username, const char *display_name, const char *avatar_url, user_t *out) {
     if (github_id == 0 || !username || strlen(username) == 0) return false;
 
+    /* Pick the id up front so that, on first sign-in (insert), we can
+     * make the account its own owner -- i.e. every account always sees
+     * itself in its own contributor list. $setOnInsert leaves owner_id
+     * (and _id) untouched on subsequent logins for an existing account. */
+    bson_oid_t new_oid;
+    bson_oid_init(&new_oid, NULL);
+
     bson_t *query  = BCON_NEW("github_id", BCON_INT64(github_id));
-    bson_t *update = BCON_NEW("$set", "{",
-        "github_id",     BCON_INT64(github_id),
-        "username",      BCON_UTF8(username),
-        "display_name",  BCON_UTF8(display_name ? display_name : ""),
-        "avatar_url",    BCON_UTF8(avatar_url ? avatar_url : ""),
-    "}");
+    bson_t *update = BCON_NEW(
+        "$set", "{",
+            "github_id",     BCON_INT64(github_id),
+            "username",      BCON_UTF8(username),
+            "display_name",  BCON_UTF8(display_name ? display_name : ""),
+            "avatar_url",    BCON_UTF8(avatar_url ? avatar_url : ""),
+        "}",
+        "$setOnInsert", "{",
+            "_id",       BCON_OID(&new_oid),
+            "owner_id",  BCON_OID(&new_oid),
+        "}");
 
     mongoc_find_and_modify_opts_t *opts = mongoc_find_and_modify_opts_new();
     mongoc_find_and_modify_opts_set_update(opts, update);
