@@ -12,11 +12,7 @@ On Debian/Ubuntu:
 sudo apt install libsqlite3-dev libcurl4-openssl-dev
 ```
 
-On macOS (with Homebrew):
-
-```bash
-brew install sqlite curl
-```
+On macOS, the Xcode SDK already ships `sqlite3` and `curl`, so nothing extra needs installing. `brew install sqlite` would not help even if you ran it: Homebrew keeps its sqlite keg-only and off the default include path.
 
 Then:
 
@@ -52,7 +48,7 @@ The menu lets you create and browse projects, issues, labels, users, and comment
 
 After a successful login the access token is written to `$XDG_CONFIG_HOME/mini-gh-tracker/token`, or `~/.config/mini-gh-tracker/token` when `XDG_CONFIG_HOME` is not set. The directories are created with mode 0700 and the file with mode 0600, so no other user on the machine can read it. The token is never written to the database.
 
-Both test suites redirect `XDG_CONFIG_HOME` at a scratch directory, so running them neither reads nor overwrites a token you have saved, and never reaches the network.
+The unit tests (`make test`) and the end-to-end tests (`make e2e`) both redirect `XDG_CONFIG_HOME` at a scratch directory, so running them neither reads nor overwrites a token you have saved, and never reaches the network.
 
 ## Testing
 
@@ -60,25 +56,50 @@ Both test suites redirect `XDG_CONFIG_HOME` at a scratch directory, so running t
 make test
 ```
 
-This builds and runs every `tests/test_*.c` file. Tests use an in-memory database, so they do not touch `issues.db`.
+This builds and runs every `tests/test_*.c` file against an in-memory database, so it never touches `issues.db`.
+
+```bash
+make e2e
+```
+
+This drives the compiled binary itself through piped stdin, the way a person would use it. It needs a build first, which the `e2e` target does for you.
+
+```bash
+make check
+```
+
+Runs both suites, `make test` then `make e2e`.
+
+Any of the three can run with ASan and UBSan turned on:
+
+```bash
+make clean && make SANITIZE=1 test
+```
+
+Start from `make clean` first: object files are keyed on mtime, not on which flags built them, so a plain `make SANITIZE=1 test` after an unsanitized build reuses the old objects and reports a pass without the sanitizers having seen any of the code.
 
 ## Project layout
 
 ```
 mini-gh-tracker/
 ├── Makefile
+├── .clangd         editor include paths, kept in sync with the real build flags
 ├── include/
-│   ├── db.h, models.h, util.h
-│   ├── core/     business logic per module
+│   ├── db.h, models.h, util.h, json.h, token_store.h, render.h, assets.h
+│   ├── core/          business logic per module
 │   └── ui/menu.h
 ├── src/
-│   ├── main.c    entry point, opens the database and starts the menu
-│   ├── util.c    id generation and small string helpers
-│   ├── db.c      SQLite CRUD
-│   ├── github.c  GitHub device flow login and API calls (libcurl)
-│   ├── core/     business rules (projects, issues, labels, users, comments)
-│   └── ui/menu.c terminal menu front-end
-└── tests/        one test file per module, run by make test
+│   ├── main.c         entry point, opens the database and starts the menu
+│   ├── util.c         id generation and small string helpers
+│   ├── db.c           SQLite CRUD
+│   ├── github.c       GitHub device flow login and API calls (libcurl)
+│   ├── json.c         minimal JSON parser for GitHub API responses
+│   ├── token_store.c  reads and writes the cached GitHub token (0600)
+│   ├── render.c       terminal color/size decisions and the splash screen
+│   ├── assets.c       embedded ASCII wordmark art
+│   ├── core/          business rules (projects, issues, labels, users, comments)
+│   └── ui/menu.c      terminal menu front-end
+└── tests/             one test file per module, run by make test
 ```
 
 ## Notes

@@ -43,7 +43,6 @@ package "Boundary (terminal UI)" {
     +render_query_size(cols : int*, rows : int*) : void
     +render_mode() : render_mode_t
     +render_color() : bool
-    +render_request_size() : void
     +render_accent() : const char*
     +render_dim() : const char*
     +render_reset() : const char*
