@@ -5,9 +5,18 @@
 #include "models.h"
 
 /* Open the one sqlite connection and build the schema; everything below assumes
-   db_init returned true. db_shutdown closes it at exit. */
+   db_init returned true. A false return leaves no connection open, so a caller
+   is free to try a different path. db_shutdown closes it at exit. */
 bool db_init(const char *path);   // path is a filename or ":memory:"
 void db_shutdown(void);
+
+/* Every call below that returns int (the list, search and filter calls) shares
+   one convention: the value is how many rows came back, 0 for none, and -1 when
+   the query or an allocation failed. An empty table and a broken one are not
+   the same answer, which is why the failure case is negative rather than 0.
+   On 0 and on -1 alike *out_list is left NULL, so a caller that loops to the
+   count and frees the pointer stays correct without checking the sign first.
+   A positive count hands back a heap array the caller owns and frees. */
 
 /* ---- Project Management ---- */
 /* Projects are the top-level grouping. Creation guards the UNIQUE name, and the

@@ -16,18 +16,25 @@ static sqlite3 *DB = NULL;
    PRAGMA, so it has to be re-asserted here on each open, not just when the file
    is first built. The join tables (issue_labels, issue_assignees) give each pair
    a composite primary key, which is what lets the assign calls use INSERT OR
-   IGNORE to treat a duplicate as a no-op. */
+   IGNORE to treat a duplicate as a no-op.
+
+   Each id column spells out NOT NULL because sqlite still lets a TEXT PRIMARY
+   KEY hold NULL, a legacy quirk it keeps for file compatibility. That matters
+   here: the row readers below print every id straight into snprintf("%s"), and
+   a NULL there is undefined. IF NOT EXISTS means a database created before this
+   line keeps its old shape, which is fine, since nothing in this program has
+   ever written a NULL id. */
 static const char *SCHEMA =
     "PRAGMA foreign_keys=ON;"
     "CREATE TABLE IF NOT EXISTS projects("
-    "  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE);"
+    "  id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE);"
     "CREATE TABLE IF NOT EXISTS labels("
-    "  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT);"
+    "  id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, description TEXT);"
     "CREATE TABLE IF NOT EXISTS users("
-    "  id TEXT PRIMARY KEY, username TEXT, display_name TEXT,"
+    "  id TEXT PRIMARY KEY NOT NULL, username TEXT, display_name TEXT,"
     "  avatar_url TEXT, github_id INTEGER UNIQUE);"
     "CREATE TABLE IF NOT EXISTS issues("
-    "  id TEXT PRIMARY KEY,"
+    "  id TEXT PRIMARY KEY NOT NULL,"
     "  project_id TEXT NOT NULL REFERENCES projects(id),"
     "  issue_number INTEGER NOT NULL, title TEXT NOT NULL,"
     "  description TEXT, status INTEGER NOT NULL DEFAULT 0);"
@@ -40,20 +47,29 @@ static const char *SCHEMA =
     "  user_id TEXT NOT NULL REFERENCES users(id),"
     "  PRIMARY KEY(issue_id, user_id));"
     "CREATE TABLE IF NOT EXISTS comments("
-    "  id TEXT PRIMARY KEY,"
+    "  id TEXT PRIMARY KEY NOT NULL,"
     "  issue_id TEXT NOT NULL REFERENCES issues(id),"
     "  text TEXT NOT NULL, created_at INTEGER NOT NULL);";
 
 /* Open the database (a file, or ":memory:" for tests) and lay down the schema.
    Returns false if either step fails so main can stop before serving a half
-   built store. sqlite owns the error string, so it is printed and then released
-   with sqlite3_free, not free. */
+   built store. Both failures close the handle and null DB first. sqlite3_open
+   allocates a connection object even when it reports failure, so it has to be
+   closed either way, and a schema that never applied must not be left behind as
+   an open connection for the next prepare to run against. sqlite owns the error
+   string, so it is printed and then released with sqlite3_free, not free. */
 bool db_init(const char *path) {
-    if (sqlite3_open(path, &DB) != SQLITE_OK) return false;
+    if (sqlite3_open(path, &DB) != SQLITE_OK) {
+        sqlite3_close(DB);
+        DB = NULL;
+        return false;
+    }
     char *err = NULL;
     if (sqlite3_exec(DB, SCHEMA, NULL, NULL, &err) != SQLITE_OK) {
         fprintf(stderr, "schema error: %s\n", err ? err : "?");
         sqlite3_free(err);
+        sqlite3_close(DB);
+        DB = NULL;
         return false;
     }
     return true;
@@ -117,16 +133,17 @@ bool db_project_find_by_id(const char *id, project_t *out) {
 }
 
 /* Return every project, name-sorted for the menu, as a heap array the caller
-   owns and frees. The return value is the count; 0 covers an empty table and
-   any allocation or query failure alike. */
+   owns and frees. The return value is the row count, or -1 when the query or an
+   allocation failed, which is what tells an empty table apart from a broken one.
+   *out_list stays NULL on every failure path. */
 int db_project_list(project_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, "SELECT id, name FROM projects ORDER BY name",
-                           -1, &st, NULL) != SQLITE_OK) return 0;
-    int cap = 0, n = 0;
+                           -1, &st, NULL) != SQLITE_OK) return -1;
+    int cap = 0, n = 0, rc;
     project_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Grow by doubling so a long list does not realloc on every row. The
            new block lands in tmp first: if realloc fails we still hold arr to
            free it, and st is finalized on that path too, since an early return
@@ -135,7 +152,7 @@ int db_project_list(project_t **out_list) {
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             project_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;   // assign only after realloc succeeds, per the audit
         }
         /* Zero the slot before the copies so any column the row leaves unset
@@ -146,6 +163,10 @@ int db_project_list(project_t **out_list) {
         n++;
     }
     sqlite3_finalize(st);
+    /* Anything other than DONE means the walk stopped early, so the rows read so
+       far are a partial answer and get thrown away rather than passed off as the
+       whole table. */
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }
@@ -203,21 +224,22 @@ bool db_label_find_by_id(const char *id, label_t *out) {
     return found;
 }
 
-/* Every label, name-sorted, as a heap array the caller frees. */
+/* Every label, name-sorted, as a heap array the caller frees. Count on success,
+   -1 if the query or an allocation failed. */
 int db_label_list(label_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB, "SELECT id, name, description FROM labels ORDER BY name",
-                           -1, &st, NULL) != SQLITE_OK) return 0;
-    int cap = 0, n = 0;
+                           -1, &st, NULL) != SQLITE_OK) return -1;
+    int cap = 0, n = 0, rc;
     label_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Doubling growth; realloc into tmp so a failure still leaves arr
            freeable and st finalizable before the return. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             label_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;
         }
         memset(&arr[n], 0, sizeof(arr[n]));
@@ -228,6 +250,7 @@ int db_label_list(label_t **out_list) {
         n++;
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }
@@ -235,11 +258,13 @@ int db_label_list(label_t **out_list) {
 /* Install the default bug/feature/question labels, but only on a fresh store. */
 void db_labels_seed(void) {
     /* Only seed an empty table so calling this on every startup stays a no-op
-       once the defaults exist. */
+       once the defaults exist. A -1 means the read itself failed, and writing
+       into a store we could not even read from would just pile on, so any
+       answer other than "no labels yet" backs out here. */
     label_t *existing = NULL;
     int n = db_label_list(&existing);
     free(existing);
-    if (n > 0) return;
+    if (n != 0) return;
     label_t tmp;
     db_label_create("bug", "", &tmp);
     db_label_create("feature", "", &tmp);
@@ -320,28 +345,30 @@ bool db_user_find_by_github_id(long long github_id, user_t *out) {
     return found;
 }
 
-/* Every user, username-sorted, for the assignee picker. */
+/* Every user, username-sorted, for the assignee picker. Count on success, -1 if
+   the query or an allocation failed. */
 int db_user_list(user_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB,
             "SELECT id, username, display_name, avatar_url, github_id FROM users ORDER BY username",
-            -1, &st, NULL) != SQLITE_OK) return 0;
-    int cap = 0, n = 0;
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    int cap = 0, n = 0, rc;
     user_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Grow on demand, guarding the realloc the same way as the other list
            queries. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             user_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;
         }
         user_read_row(st, &arr[n]);
         n++;
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }
@@ -496,30 +523,32 @@ bool db_issue_set_status(const char *id, issue_status_t new_status) {
 }
 
 /* Every issue in a project, ordered by the per-project number so the list reads
-   1, 2, 3. Scalars only; labels and assignees are not loaded for a list view. */
+   1, 2, 3. Scalars only; labels and assignees are not loaded for a list view.
+   Count on success, -1 if the query or an allocation failed. */
 int db_issue_list_by_project(const char *project_id, issue_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(DB,
             "SELECT id, project_id, issue_number, title, description, status"
             " FROM issues WHERE project_id=? ORDER BY issue_number",
-            -1, &st, NULL) != SQLITE_OK) return 0;
+            -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(st, 1, project_id, -1, SQLITE_STATIC);
-    int cap = 0, n = 0;
+    int cap = 0, n = 0, rc;
     issue_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Same doubling buffer; the realloc-failure branch frees arr and
-           finalizes st before returning 0. */
+           finalizes st before returning -1. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;
         }
         issue_read_scalar(st, &arr[n]);
         n++;
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }
@@ -552,7 +581,8 @@ static void like_escape(const char *in, char *out, size_t outlen) {
 
 /* Substring search over title and description within one project. The keyword is
    LIKE-escaped, wrapped in %...%, then bound, so a % or _ the user types matches
-   literally instead of behaving as a wildcard. limit caps the returned rows. */
+   literally instead of behaving as a wildcard. limit caps the returned rows.
+   Count on success, -1 if the query or an allocation failed. */
 int db_issue_search(const char *project_id, const char *keyword, int limit, issue_t **out_list) {
     *out_list = NULL;
     if (!keyword) keyword = "";   // caller input crosses a trust boundary here and may be NULL
@@ -564,33 +594,35 @@ int db_issue_search(const char *project_id, const char *keyword, int limit, issu
         "SELECT id, project_id, issue_number, title, description, status "
         "FROM issues WHERE project_id = ? AND (title LIKE ? ESCAPE '\\' "
         "OR description LIKE ? ESCAPE '\\') ORDER BY issue_number LIMIT ?";
-    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(st, 1, project_id, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, pattern, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 3, pattern, -1, SQLITE_STATIC);
     sqlite3_bind_int(st, 4, limit);
-    int cap = 0, n = 0;
+    int cap = 0, n = 0, rc;
     issue_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Grow the result array by doubling; the failure branch frees arr and
            finalizes st before the early return. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;
         }
         issue_read_scalar(st, &arr[n]);
         n++;
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }
 
 /* List a project's issues narrowed by an optional status and/or label. Only fixed
    SQL fragments are chosen in C here; every actual value is bound below, and the
-   bind index walks forward only over the fragments that were included. */
+   bind index walks forward only over the fragments that were included. Count on
+   success, -1 if the query or an allocation failed. */
 int db_issue_filter(const char *project_id, const char *status_filter, const char *label_id_filter,
                     int limit, issue_t **out_list) {
     *out_list = NULL;
@@ -617,27 +649,28 @@ int db_issue_filter(const char *project_id, const char *status_filter, const cha
     }
 
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return -1;
     int idx = 1;
     sqlite3_bind_text(st, idx++, project_id, -1, SQLITE_STATIC);
     if (has_label) sqlite3_bind_text(st, idx++, label_id_filter, -1, SQLITE_STATIC);
     if (has_status) sqlite3_bind_int(st, idx++, status_val);
     sqlite3_bind_int(st, idx++, limit);
 
-    int cap = 0, n = 0;
+    int cap = 0, n = 0, rc;
     issue_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Same guarded doubling as the other list queries. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             issue_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;
         }
         issue_read_scalar(st, &arr[n]);
         n++;
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }
@@ -674,7 +707,8 @@ bool db_comment_add(const char *issue_id, const char *text) {
     return ok;
 }
 
-/* All comments on an issue, oldest first. */
+/* All comments on an issue, oldest first. Count on success, -1 if the query or
+   an allocation failed. */
 int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
     *out_list = NULL;
     sqlite3_stmt *st;
@@ -683,17 +717,17 @@ int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
        timestamp cannot guarantee on its own. */
     if (sqlite3_prepare_v2(DB,
             "SELECT id, text FROM comments WHERE issue_id=? ORDER BY created_at, rowid",
-            -1, &st, NULL) != SQLITE_OK) return 0;
+            -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(st, 1, issue_id, -1, SQLITE_STATIC);
-    int cap = 0, n = 0;
+    int cap = 0, n = 0, rc;
     comment_t *arr = NULL;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         /* Doubling growth; realloc into tmp so a failure frees arr and finalizes
            st before returning. */
         if (n == cap) {
             int ncap = cap ? cap * 2 : 8;
             comment_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); *out_list = NULL; sqlite3_finalize(st); return 0; }
+            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
             arr = tmp; cap = ncap;
         }
         memset(&arr[n], 0, sizeof(arr[n]));
@@ -702,6 +736,7 @@ int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
         n++;
     }
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(arr); return -1; }
     *out_list = arr;
     return n;
 }

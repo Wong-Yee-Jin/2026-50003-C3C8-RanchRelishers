@@ -1,7 +1,10 @@
 #include "unity.h"
 #include "db.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define NOT_A_DATABASE_PATH "/tmp/mght_not_a_database.tmp"
 
 /* Every case opens its own empty in-memory database. The flat version of this
    file shared one connection across all of its checks, so a row created for an
@@ -28,6 +31,47 @@ static void seed_two_projects(project_t *p, project_t *p2) {
     TEST_ASSERT_TRUE(db_issue_set_status(i1.id, STATUS_CLOSED));
     TEST_ASSERT_TRUE(db_project_create("Mobile", p2));
     TEST_ASSERT_TRUE(db_issue_create(p2->id, "Login button broken", "steps...", &i3));
+}
+
+/* ---- Opening the database ---- */
+
+/* A failed open used to leave the handle behind, so the next db_init would
+   stack a second connection on top of a dead one. Both cases here drop the
+   connection setUp made, fail an init on purpose, then check that a good init
+   still comes up with a working schema. If the failure had left anything
+   behind, the create below is where it would show. */
+static void test_init_refuses_a_path_it_cannot_open(void) {
+    db_shutdown();
+    TEST_ASSERT_FALSE(db_init("/nonexistent-directory-for-db-test/issues.db"));
+    TEST_ASSERT_TRUE(db_init(":memory:"));
+    project_t p;
+    TEST_ASSERT_TRUE(db_project_create("Backend", &p));
+}
+
+/* The other half of the same fix: the file opens fine, then the schema will not
+   apply to it. A few bytes of junk are not a database, so sqlite rejects the
+   exec and prints a schema error, which is expected output for this case. */
+static void test_init_refuses_a_file_that_is_not_a_database(void) {
+    FILE *f = fopen(NOT_A_DATABASE_PATH, "wb");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_size_t(18, fwrite("this is not sqlite", 1, 18, f));
+    fclose(f);
+
+    db_shutdown();
+    TEST_ASSERT_FALSE(db_init(NOT_A_DATABASE_PATH));
+    remove(NOT_A_DATABASE_PATH);
+    TEST_ASSERT_TRUE(db_init(":memory:"));
+    project_t p;
+    TEST_ASSERT_TRUE(db_project_create("Backend", &p));
+}
+
+/* An empty table and a failed query are different answers: 0 means there is
+   nothing to show, -1 means the read broke. Only the 0 half can be reached
+   through the public calls, so that is the half pinned here. */
+static void test_listing_an_empty_table_is_zero_not_an_error(void) {
+    project_t *list = NULL;
+    TEST_ASSERT_EQUAL_INT(0, db_project_list(&list));
+    TEST_ASSERT_NULL(list);
 }
 
 /* ---- Use case: Create Project ---- */
@@ -233,6 +277,9 @@ static void test_search_issue_with_a_null_keyword_returns_the_project(void) {
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_init_refuses_a_path_it_cannot_open);
+    RUN_TEST(test_init_refuses_a_file_that_is_not_a_database);
+    RUN_TEST(test_listing_an_empty_table_is_zero_not_an_error);
     RUN_TEST(test_create_project_stores_name_and_id);
     RUN_TEST(test_create_project_reports_a_taken_name);
     RUN_TEST(test_view_projects_finds_one_by_id);
