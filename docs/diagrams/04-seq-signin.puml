@@ -1,0 +1,93 @@
+@startuml seq-signin
+' UC1 Sign In with GitHub (device flow).
+' Every message is the real C function name. Replaces the Meeting 2 web
+' redirect flow, which had no equivalent in a terminal application.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "github.c" as gh
+participant "json.c" as json
+participant "token_store.c" as tok
+participant "db.c" as db
+participant "auth_ctx.c" as auth
+participant "GitHub Server" as server
+
+User -> menu : select "4) GitHub login"
+activate menu
+menu -> menu : github_login()
+
+menu -> gh : github_device_start(&dev)
+activate gh
+gh -> server : http_post_form(\n  "github.com/login/device/code")
+server --> gh : device_code, user_code,\nverification_uri, interval
+gh -> json : json_field() / json_field_int()
+json --> gh : parsed fields
+gh --> menu : GH_OK
+deactivate gh
+
+menu -> User : display verification_uri\nand user_code
+User -> server : authorize device in browser
+
+loop until GH_OK or terminal error (max GH_MAX_POLLS = 180)
+  menu -> gh : github_device_poll(device_code, token, n)
+  activate gh
+  gh -> server : http_post_form(\n  "github.com/login/oauth/access_token")
+  server --> gh : response body
+  gh -> gh : github_parse_token_response(body, token, n)
+  gh -> json : json_field()
+  json --> gh : access_token or error
+  gh --> menu : GH_OK | GH_PENDING | GH_SLOW_DOWN\n| GH_EXPIRED | GH_DENIED
+  deactivate gh
+end
+
+alt GH_OK
+  menu -> tok : token_save(token)
+  activate tok
+  tok --> menu : true (file written with mode 0600)
+  deactivate tok
+
+  menu -> gh : github_fetch_and_upsert_user(token, &user, &rejected)
+  activate gh
+  gh -> server : http_get_bearer("api.github.com/user")
+  server --> gh : id, login, name, avatar_url
+  gh -> json : json_field_int() / json_field()
+  json --> gh : parsed profile
+  gh -> db : db_user_upsert_github(github_id, username,\n  display_name, avatar_url, &user)
+  activate db
+  db -> db : db_user_find_by_github_id(github_id)
+  alt github_id already known
+    db -> db : UPDATE users
+  else first sign in
+    db -> db : id_generate() then INSERT users
+  end
+  db --> gh : true
+  deactivate db
+  gh --> menu : true
+  deactivate gh
+
+  menu -> auth : auth_ctx_set_user(user.id)
+  menu -> User : "signed in as <username>"
+
+else GH_EXPIRED or GH_DENIED
+  menu -> User : report failure, token not saved
+end
+
+deactivate menu
+
+note over menu, auth
+  At startup github_resume_session() runs the
+  same tail of this flow: token_load() then
+  github_fetch_and_upsert_user() then
+  auth_ctx_set_user(). With no network it falls
+  back to auth_ctx_set_user("local") so local
+  work continues offline.
+end note
+
+@enduml

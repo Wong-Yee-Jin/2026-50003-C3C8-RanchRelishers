@@ -1,0 +1,75 @@
+@startuml seq-view-issue
+' UC4 View Issue. The issue row stores label and assignee ids only, so the UI
+' resolves them to readable names by listing each collection once. That is why
+' a single read screen touches four services.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "issue_service.c" as isvc
+participant "label_service.c" as lsvc
+participant "user_service.c" as usvc
+participant "comment_service.c" as csvc
+participant "db.c" as db
+
+User -> menu : select an issue by number
+activate menu
+menu -> menu : screen_issue_detail(issue_id)
+
+menu -> isvc : issue_service_get(issue_id, &issue)
+activate isvc
+isvc -> db : db_issue_find_by_id(id, &issue)
+activate db
+db -> db : SELECT from issues
+db -> db : SELECT from issue_labels
+db -> db : SELECT from issue_assignees
+db --> isvc : true
+deactivate db
+isvc --> menu : SVC_OK
+deactivate isvc
+
+alt issue not found
+  menu -> User : "not found", return to issue list
+else found
+  menu -> menu : screen_header("Issue #<n>")
+  menu -> menu : print_issue(&issue)
+
+  menu -> lsvc : label_service_list(&labels)
+  activate lsvc
+  lsvc -> db : db_label_list(&labels)
+  db --> lsvc : rows
+  lsvc --> menu : count
+  deactivate lsvc
+
+  menu -> usvc : user_service_list(&users)
+  activate usvc
+  usvc -> db : db_user_list(&users)
+  db --> usvc : rows
+  usvc --> menu : count
+  deactivate usvc
+
+  menu -> csvc : comment_service_list(issue_id, &comments)
+  activate csvc
+  csvc -> db : db_comment_list_by_issue(issue_id, &comments)
+  db --> csvc : rows in insertion order
+  csvc --> menu : count
+  deactivate csvc
+
+  menu -> User : render number, title, status,\nlabels, assignees, comments
+end
+deactivate menu
+
+note over menu
+  The issue is re-fetched at the top of every
+  loop pass rather than cached, so a status
+  toggle or a new comment appears on the next
+  redraw without a stale read.
+end note
+
+@enduml

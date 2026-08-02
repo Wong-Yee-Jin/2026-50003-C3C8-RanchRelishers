@@ -1,0 +1,70 @@
+@startuml seq-close-reopen
+' UC6 Close Issue and UC7 Reopen Issue.
+'
+' These are two distinct user goals but one code path. The web version on the
+' main branch had separate POST /issues/:id/close and /reopen routes. The
+' terminal version has a single toggle whose argument is derived from the
+' current status, so both use cases call issue_service_set_status with a
+' different issue_status_t value. Shown together to keep the diagram honest
+' about what the code actually does.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "issue_service.c" as svc
+participant "auth_ctx.c" as auth
+participant "db.c" as db
+
+User -> menu : press "t" on the issue detail screen
+activate menu
+menu -> menu : screen_issue_detail(issue_id)
+
+note right of menu
+  next = (is.status == STATUS_OPEN)
+         ? STATUS_CLOSED
+         : STATUS_OPEN
+end note
+
+alt issue currently open (UC6 Close Issue)
+  menu -> svc : issue_service_set_status(issue_id, STATUS_CLOSED)
+else issue currently closed (UC7 Reopen Issue)
+  menu -> svc : issue_service_set_status(issue_id, STATUS_OPEN)
+end
+
+activate svc
+svc -> auth : auth_ctx_is_authed()
+activate auth
+auth --> svc : true / false
+deactivate auth
+
+alt not signed in
+  svc --> menu : SVC_DENIED
+else
+  svc -> db : db_issue_set_status(id, new_status)
+  activate db
+  db -> db : UPDATE issues SET status = ? WHERE id = ?
+  db --> svc : true / false
+  deactivate db
+  alt row updated
+    svc --> menu : SVC_OK
+  else no such issue
+    svc --> menu : SVC_NOT_FOUND
+  end
+end
+deactivate svc
+
+menu -> menu : print_result(result, "invalid request")
+menu -> svc : issue_service_get(issue_id, &issue)
+activate svc
+svc --> menu : refreshed issue
+deactivate svc
+menu -> User : redraw detail showing [closed] or [open]
+deactivate menu
+
+@enduml

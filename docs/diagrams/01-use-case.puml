@@ -1,0 +1,82 @@
+@startuml use-case
+' Mini GitHub Issue Tracker, terminal version.
+' Project Meeting 3. Ten use cases carried over from Meeting 2 (two renamed),
+' plus eight added during the terminal migration.
+
+left to right direction
+skinparam packageStyle rectangle
+skinparam backgroundColor white
+skinparam usecase {
+  BackgroundColor #AEDCF0
+  BorderColor #333333
+}
+skinparam actor {
+  BorderColor #333333
+}
+
+actor "User" as user
+actor "GitHub Server" as github
+
+rectangle "Mini GitHub Issue Tracker (Terminal)" {
+
+  ' ---- Carried over from Meeting 2 ----
+  usecase "Sign In with GitHub" as UC1
+  usecase "View Projects"       as UC2
+  usecase "Create Project"      as UC3
+  usecase "View Issue"          as UC4
+  usecase "Create Issue"        as UC5
+  usecase "Close Issue"         as UC6
+  usecase "Reopen Issue"        as UC7
+  usecase "View Labels"         as UC8
+  usecase "Search Issue"        as UC9
+  usecase "Assign User\nto Issue" as UC10
+
+  ' ---- Added since Meeting 2 ----
+  usecase "Sign Out"            as UC11
+  usecase "Create Label"        as UC12
+  usecase "Assign Label\nto Issue" as UC13
+  usecase "Add Comment\nto Issue"  as UC14
+  usecase "Filter Issues"       as UC15
+  usecase "View My GitHub\nRepositories" as UC16
+  usecase "Create Local User"   as UC17
+  usecase "View Assignees"      as UC18
+}
+
+user --> UC1
+user --> UC2
+user --> UC3
+user --> UC4
+user --> UC5
+user --> UC6
+user --> UC7
+user --> UC8
+user --> UC9
+user --> UC10
+user --> UC11
+user --> UC12
+user --> UC13
+user --> UC14
+user --> UC15
+user --> UC16
+user --> UC17
+user --> UC18
+
+' GitHub is a secondary actor only where the network is actually involved.
+UC1  --> github
+UC16 --> github
+
+' Resuming a cached session revalidates the stored token, so sign in is
+' reached both explicitly and at startup.
+note bottom of UC1
+  Covers first-time registration and
+  returning login. db_user_upsert_github
+  inserts or updates on github_id, so a
+  separate Sign Up use case no longer applies.
+end note
+
+note bottom of UC10
+  Renamed from "Add Project Contributor".
+  Assignment is per issue, not per project.
+end note
+
+@enduml

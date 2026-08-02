@@ -1,0 +1,65 @@
+@startuml seq-create-project
+' UC3 Create Project. Shows the auth gate and the uniqueness rule, both of
+' which live in the service layer rather than in the UI or the database.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "project_service.c" as svc
+participant "auth_ctx.c" as auth
+participant "db.c" as db
+participant "util.c" as util
+
+User -> menu : select "1) Projects", then "c"
+activate menu
+menu -> menu : screen_projects()
+menu -> User : prompt "project name: "
+User -> menu : type name
+menu -> menu : read_line() then ui_trim()
+
+menu -> svc : project_service_create(name, &project)
+activate svc
+
+svc -> auth : auth_ctx_is_authed()
+activate auth
+auth --> svc : true / false
+deactivate auth
+
+alt not signed in
+  svc --> menu : SVC_DENIED
+else name is blank
+  svc --> menu : SVC_INVALID
+else
+  svc -> db : db_project_name_exists(name)
+  activate db
+  db --> svc : true / false
+  deactivate db
+
+  alt name already taken
+    svc --> menu : SVC_INVALID
+  else
+    svc -> db : db_project_create(name, &project)
+    activate db
+    db -> util : id_generate(id)
+    activate util
+    util --> db : 24-char hex id
+    deactivate util
+    db -> db : INSERT INTO projects (bound parameters)
+    db --> svc : true
+    deactivate db
+    svc --> menu : SVC_OK
+  end
+end
+deactivate svc
+
+menu -> menu : print_result(result, "name taken or empty")
+menu -> User : show outcome, then redraw project list
+deactivate menu
+
+@enduml

@@ -1,0 +1,65 @@
+@startuml seq-create-issue
+' UC5 Create Issue. Issue numbers are per project, allocated inside the same
+' database call that inserts the row.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "issue_service.c" as svc
+participant "auth_ctx.c" as auth
+participant "db.c" as db
+participant "util.c" as util
+
+User -> menu : select a project, then "c"
+activate menu
+menu -> menu : screen_issues(project_id, project_name)
+menu -> User : prompt "title: "
+User -> menu : type title
+menu -> User : prompt "description: "
+User -> menu : type description
+menu -> menu : read_line() then ui_trim()
+
+menu -> svc : issue_service_create(project_id, title, desc, &issue)
+activate svc
+
+svc -> auth : auth_ctx_is_authed()
+activate auth
+auth --> svc : true / false
+deactivate auth
+
+alt not signed in
+  svc --> menu : SVC_DENIED
+else title is blank
+  svc --> menu : SVC_INVALID
+else
+  svc -> db : db_issue_create(project_id, title, description, &issue)
+  activate db
+  db -> util : id_generate(id)
+  activate util
+  util --> db : 24-char hex id
+  deactivate util
+  db -> db : SELECT COALESCE(MAX(issue_number), 0) + 1\n  FROM issues WHERE project_id = ?
+  db -> db : INSERT INTO issues (bound parameters)
+  db --> svc : true
+  deactivate db
+  svc --> menu : SVC_OK
+end
+deactivate svc
+
+menu -> menu : print_result(result, "title required")
+menu -> svc : issue_service_list(project_id, &list)
+activate svc
+svc -> db : db_issue_list_by_project(project_id, &list)
+db --> svc : rows
+svc --> menu : count
+deactivate svc
+menu -> User : redraw issue list showing #1
+deactivate menu
+
+@enduml

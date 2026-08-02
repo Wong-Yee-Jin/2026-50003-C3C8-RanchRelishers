@@ -1,0 +1,78 @@
+@startuml seq-assign-user
+' UC10 Assign User to Issue.
+' Renamed from "Add Project Contributor" in the Meeting 2 report. Assignment
+' is issue level, recorded in the issue_assignees join table. There is no
+' project membership concept.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "user_service.c" as usvc
+participant "issue_service.c" as isvc
+participant "auth_ctx.c" as auth
+participant "db.c" as db
+
+User -> menu : press "a" on the issue detail screen
+activate menu
+
+menu -> usvc : user_service_list(&users)
+activate usvc
+usvc -> db : db_user_list(&users)
+activate db
+db --> usvc : rows
+deactivate db
+usvc --> menu : count
+deactivate usvc
+
+menu -> User : display numbered list of users
+User -> menu : choose a number
+menu -> menu : read_line() then ui_parse_choice()
+
+alt choice out of range
+  menu -> User : "invalid choice"
+else
+  menu -> isvc : issue_service_add_assignee(issue_id, user_id)
+  activate isvc
+
+  isvc -> auth : auth_ctx_is_authed()
+  activate auth
+  auth --> isvc : true / false
+  deactivate auth
+
+  alt not signed in
+    isvc --> menu : SVC_DENIED
+  else
+    isvc -> db : db_issue_assign_user(issue_id, user_id)
+    activate db
+    db -> db : INSERT OR IGNORE INTO issue_assignees
+    note right of db
+      INSERT OR IGNORE makes the operation
+      idempotent, so assigning the same user
+      twice is not an error.
+    end note
+    db --> isvc : true
+    deactivate db
+    isvc --> menu : SVC_OK
+  end
+  deactivate isvc
+
+  menu -> menu : print_result(result, "invalid request")
+  menu -> User : redraw detail with the assignee listed
+end
+deactivate menu
+
+note over menu, db
+  Users reach the database two ways: from GitHub
+  sign in via db_user_upsert_github, or created
+  locally on the Assignees screen through
+  user_service_create. Before the local path was
+  added this list was empty without network access.
+end note
+
+@enduml

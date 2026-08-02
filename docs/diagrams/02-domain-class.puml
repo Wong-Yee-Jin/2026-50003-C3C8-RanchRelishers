@@ -1,0 +1,59 @@
+@startuml domain-class
+' Domain model for the terminal version.
+' Changes since Meeting 2:
+'   - Contributor entity removed. Assignment is User to Issue, not per project.
+'   - Comment added as a first-class entity.
+'   - estimateMinutes / loggedMinutes removed with the time-tracking feature.
+
+skinparam backgroundColor white
+skinparam class {
+  BackgroundColor #AEDCF0
+  BorderColor #333333
+}
+hide methods
+
+class User {
+  userId : string
+  githubId : long long
+  username : string
+  displayName : string
+  avatarUrl : string
+}
+
+class Project {
+  projectId : string
+  projectName : string
+}
+
+class Issue {
+  issueId : string
+  issueNumber : int
+  issueTitle : string
+  issueDescription : string
+  issueStatus : enum {open, closed}
+}
+
+class Label {
+  labelId : string
+  labelName : string
+  labelDescription : string
+}
+
+class Comment {
+  commentId : string
+  text : string
+  createdAt : unix time
+}
+
+Project "1" *-- "*" Issue        : contains
+Issue   "*" -- "*" Label         : categorised by
+Issue   "*" -- "*" User          : assigned to
+Issue   "1" *-- "*" Comment      : has
+User    "1" -- "*" Issue          : creates
+
+note bottom of Comment
+  Comments currently store no author.
+  Known gap, see report section 5.
+end note
+
+@enduml

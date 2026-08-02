@@ -1,0 +1,248 @@
+@startuml solution-class
+' Solution class diagram for the terminal version.
+'
+' Two points of tutor feedback from Project Meeting 2 are addressed here:
+'   1. Every relationship is drawn with a dotted arrow (..>).
+'   2. Every operation name is the real C function name in the source, so the
+'      sequence diagrams and the code agree. The stereotype under each class
+'      gives the file the functions actually live in.
+'
+' C has no classes. Each box below is a translation unit and the struct it
+' operates on, which is the same mapping used in the Meeting 2 report.
+
+skinparam backgroundColor white
+skinparam class {
+  BackgroundColor #AEDCF0
+  BorderColor #333333
+}
+skinparam packageStyle rectangle
+
+package "Boundary (terminal UI)" {
+  class menu <<src/ui/menu.c>> {
+    +menu_run() : void
+    +ui_trim(s : char*) : char*
+    +ui_parse_choice(line : const char*) : int
+    -screen_projects() : void
+    -screen_issues(project_id, project_name) : void
+    -screen_issue_detail(issue_id : const char*) : void
+    -screen_labels() : void
+    -screen_assignees() : void
+    -github_login() : void
+    -github_logout() : void
+    -github_repos() : void
+    -github_resume_session() : void
+    -print_issue(is : const issue_t*) : void
+    -print_result(r : svc_result_t, reason : const char*) : void
+    -screen_header(title : const char*) : void
+    -read_line(buf : char*, n : size_t) : bool
+  }
+
+  class render <<src/render.c>> {
+    +render_mode_for(cols : int, rows : int) : render_mode_t
+    +render_color_for(is_tty : bool, no_color : const char*) : bool
+    +render_query_size(cols : int*, rows : int*) : void
+    +render_mode() : render_mode_t
+    +render_color() : bool
+    +render_request_size() : void
+    +render_accent() : const char*
+    +render_dim() : const char*
+    +render_reset() : const char*
+    +render_splash() : void
+    +splash_render_frame(frame : int, total : int) : void
+  }
+
+  class assets <<src/assets.c>> {
+    +wordmark_width() : int
+    +wordmark_height() : int
+  }
+}
+
+package "Control (core services)" {
+  class project_service <<src/core/project_service.c>> {
+    +project_service_create(name : const char*, out : project_t*) : svc_result_t
+    +project_service_list(out : project_t**) : int
+    +project_service_get(id : const char*, out : project_t*) : svc_result_t
+  }
+
+  class issue_service <<src/core/issue_service.c>> {
+    +issue_service_create(project_id, title, desc, out : issue_t*) : svc_result_t
+    +issue_service_list(project_id : const char*, out : issue_t**) : int
+    +issue_service_get(id : const char*, out : issue_t*) : svc_result_t
+    +issue_service_set_status(id : const char*, status : issue_status_t) : svc_result_t
+    +issue_service_add_label(issue_id, label_id : const char*) : svc_result_t
+    +issue_service_add_assignee(issue_id, user_id : const char*) : svc_result_t
+    +issue_service_search(project_id, keyword : const char*, out : issue_t**) : int
+    +issue_service_filter(project_id, status, label_id : const char*, out : issue_t**) : int
+  }
+
+  class label_service <<src/core/label_service.c>> {
+    +label_service_create(name, desc : const char*, out : label_t*) : svc_result_t
+    +label_service_list(out : label_t**) : int
+  }
+
+  class user_service <<src/core/user_service.c>> {
+    +user_service_create(username : const char*, out : user_t*) : svc_result_t
+    +user_service_list(out : user_t**) : int
+    +user_service_get(id : const char*, out : user_t*) : svc_result_t
+  }
+
+  class comment_service <<src/core/comment_service.c>> {
+    +comment_service_add(issue_id, text : const char*, parent : issue_t*) : svc_result_t
+    +comment_service_list(issue_id : const char*, out : comment_t**) : int
+  }
+
+  class auth_ctx <<src/core/auth_ctx.c>> {
+    +auth_ctx_set_user(user_id : const char*) : void
+    +auth_ctx_user() : const char*
+    +auth_ctx_is_authed() : bool
+  }
+}
+
+package "Integration (GitHub)" {
+  class github <<src/github.c>> {
+    +github_device_start(out : gh_device_t*) : gh_status_t
+    +github_device_poll(device_code : const char*, token_out : char*, n : size_t) : gh_status_t
+    +github_parse_token_response(body : const char*, token_out : char*, n : size_t) : gh_status_t
+    +github_fetch_and_upsert_user(token : const char*, out : user_t*, rejected : bool*) : bool
+    +github_list_repos(token : const char*, names : char[][], max : int) : int
+    +github_parse_repo_names(body : const char*, names : char[][], max : int) : int
+  }
+
+  class token_store <<src/token_store.c>> {
+    +token_path(out : char*, n : size_t) : bool
+    +token_save(token : const char*) : bool
+    +token_load(out : char*, n : size_t) : bool
+    +token_clear() : void
+  }
+
+  class json <<src/json.c>> {
+    +json_field(body, key : const char*, out : char*, n : size_t) : bool
+    +json_field_int(body, key : const char*, dflt : long) : long
+    +json_array_objects(body, field : const char*, out : char[][], max : int) : int
+  }
+}
+
+package "Data" {
+  class db <<src/db.c>> {
+    +db_init(path : const char*) : bool
+    +db_shutdown() : void
+    +db_project_create(name : const char*, out : project_t*) : bool
+    +db_project_name_exists(name : const char*) : bool
+    +db_project_find_by_id(id : const char*, out : project_t*) : bool
+    +db_project_list(out : project_t**) : int
+    +db_issue_create(project_id, title, description, out : issue_t*) : bool
+    +db_issue_find_by_id(id : const char*, out : issue_t*) : bool
+    +db_issue_set_status(id : const char*, s : issue_status_t) : bool
+    +db_issue_list_by_project(project_id : const char*, out : issue_t**) : int
+    +db_issue_search(project_id, keyword : const char*, limit : int, out : issue_t**) : int
+    +db_issue_filter(project_id, status, label_id : const char*, limit : int, out : issue_t**) : int
+    +db_issue_assign_label(issue_id, label_id : const char*) : bool
+    +db_issue_assign_user(issue_id, user_id : const char*) : bool
+    +db_label_create(name, description : const char*, out : label_t*) : bool
+    +db_label_name_exists(name : const char*) : bool
+    +db_label_find_by_id(id : const char*, out : label_t*) : bool
+    +db_label_list(out : label_t**) : int
+    +db_labels_seed() : void
+    +db_user_create(username : const char*, out : user_t*) : bool
+    +db_user_name_exists(username : const char*) : bool
+    +db_user_find_by_id(id : const char*, out : user_t*) : bool
+    +db_user_find_by_github_id(github_id : long long, out : user_t*) : bool
+    +db_user_list(out : user_t**) : int
+    +db_user_upsert_github(github_id, username, display_name, avatar_url, out : user_t*) : bool
+    +db_comment_add(issue_id, text : const char*) : bool
+    +db_comment_list_by_issue(issue_id : const char*, out : comment_t**) : int
+  }
+
+  class util <<src/util.c>> {
+    +id_generate(out : char[ID_LEN]) : bool
+  }
+}
+
+package "Model (structs)" {
+  class project_t <<include/models.h>> {
+    id : char[ID_LEN]
+    name : char[NAME_LEN]
+  }
+  class issue_t <<include/models.h>> {
+    id : char[ID_LEN]
+    project_id : char[ID_LEN]
+    issue_number : int
+    title : char[TITLE_LEN]
+    description : char[DESC_LEN]
+    status : issue_status_t
+    label_ids : char[][ID_LEN]
+    assignee_ids : char[][ID_LEN]
+  }
+  class label_t <<include/models.h>> {
+    id : char[ID_LEN]
+    name : char[NAME_LEN]
+    description : char[DESC_LEN]
+  }
+  class user_t <<include/models.h>> {
+    id : char[ID_LEN]
+    github_id : long long
+    username : char[NAME_LEN]
+    display_name : char[NAME_LEN]
+    avatar_url : char[URL_LEN]
+  }
+  class comment_t <<include/models.h>> {
+    id : char[ID_LEN]
+    issue_id : char[ID_LEN]
+    text : char[COMMENT_LEN]
+    created_at : long
+  }
+}
+
+class main <<src/main.c>> {
+  +main() : int
+}
+
+' ---------------------------------------------------------------------------
+' All relationships are dotted, per Project Meeting 2 feedback.
+' ---------------------------------------------------------------------------
+
+main ..> db              : db_init / db_shutdown
+main ..> menu            : menu_run
+
+menu ..> project_service
+menu ..> issue_service
+menu ..> label_service
+menu ..> user_service
+menu ..> comment_service
+menu ..> github
+menu ..> token_store
+menu ..> auth_ctx
+menu ..> render
+render ..> assets
+
+project_service ..> auth_ctx
+issue_service   ..> auth_ctx
+label_service   ..> auth_ctx
+user_service    ..> auth_ctx
+comment_service ..> auth_ctx
+
+project_service ..> db
+issue_service   ..> db
+label_service   ..> db
+user_service    ..> db
+comment_service ..> db
+
+github ..> json
+github ..> db            : db_user_upsert_github
+db     ..> util          : id_generate
+
+db ..> project_t
+db ..> issue_t
+db ..> label_t
+db ..> user_t
+db ..> comment_t
+
+note as N1
+  Layering holds without exception:
+  menu.c calls only *_service functions,
+  never db_* directly. Every mutating
+  service checks auth_ctx_is_authed()
+  before it reaches the database.
+end note
+
+@enduml

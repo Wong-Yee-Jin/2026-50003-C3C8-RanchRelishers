@@ -1,0 +1,64 @@
+@startuml seq-search-issue
+' UC9 Search Issue.
+'
+' Two changes since Meeting 2 are visible here. Search is now scoped to the
+' current project rather than global, and the keyword is bound as a parameter
+' with LIKE wildcards escaped, which closes the regex injection the earlier
+' MongoDB implementation allowed.
+
+skinparam backgroundColor white
+skinparam sequence {
+  ParticipantBackgroundColor #AEDCF0
+  ParticipantBorderColor #333333
+  LifeLineBorderColor #333333
+}
+
+actor User
+participant "menu.c" as menu
+participant "issue_service.c" as svc
+participant "db.c" as db
+
+User -> menu : press "s" on the issue list screen
+activate menu
+menu -> menu : screen_issues(project_id, project_name)
+menu -> User : prompt "keyword: "
+User -> menu : type keyword
+menu -> menu : read_line() then ui_trim()
+
+menu -> svc : issue_service_search(project_id, keyword, &results)
+activate svc
+
+note right of svc
+  Read path. No auth gate, because
+  browsing does not mutate anything.
+end note
+
+svc -> db : db_issue_search(project_id, keyword,\n  ISSUE_LIST_LIMIT = 200, &results)
+activate db
+db -> db : like_escape(keyword, escaped, n)
+note right of db
+  Escapes % _ and \ so a keyword
+  containing a wildcard is matched
+  literally rather than expanding.
+end note
+db -> db : SELECT ... WHERE project_id = ?\n  AND (title LIKE ? ESCAPE '\\'\n   OR description LIKE ? ESCAPE '\\')\n  LIMIT ?
+db --> svc : matching rows
+deactivate db
+
+svc --> menu : count
+deactivate svc
+
+alt count == 0
+  menu -> User : "(no matches)"
+else
+  menu -> User : list matching issues, scoped\nto this project only
+end
+deactivate menu
+
+note over svc, db
+  Filter is a separate path with the same shape:
+  issue_service_filter() calls db_issue_filter(),
+  narrowing by exact status and/or label id.
+end note
+
+@enduml
