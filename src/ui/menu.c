@@ -81,19 +81,55 @@ static void print_result(svc_result_t r, const char *invalid_reason) {
    screen the user opens instead of staying stuck at whatever mode was
    active at startup. */
 static void screen_header(const char *title) {
-    switch (render_mode()) {
+    render_mode_t mode = render_mode();
+
+    /* On a real terminal the title opens a rule that render_help_row closes
+       further down the screen. Everywhere else, including every piped run,
+       the plain header below is printed byte for byte as it always was. */
+    if (render_decorate()) {
+        char banner[TITLE_LEN + 32];
+        if (mode == RENDER_FULL) snprintf(banner, sizeof(banner), "%s %s", logo_compact, title);
+        else                     snprintf(banner, sizeof(banner), "%s", title);
+        printf("\n");
+        render_title_rule(banner);
+        return;
+    }
+
+    switch (mode) {
         case RENDER_FULL:
-            printf("\n%s%s%s  %s%s%s\n", render_accent(), logo_compact, render_reset(),
-                   render_accent(), title, render_reset());
+            printf("\n%s%s%s  %s%s%s\n", render_style(RENDER_ACCENT), logo_compact, render_reset(),
+                   render_style(RENDER_ACCENT), title, render_reset());
             break;
         case RENDER_COMPACT:
-            printf("\n%s%s%s\n", render_accent(), title, render_reset());
+            printf("\n%s%s%s\n", render_style(RENDER_ACCENT), title, render_reset());
             break;
         case RENDER_MINIMAL:
             printf("\n%s\n%senlarge to 80x24 for the full art%s\n",
-                   title, render_dim(), render_reset());
+                   title, render_style(RENDER_DIM), render_reset());
             break;
     }
+}
+
+/* Adds a closed/total bar to a project row. Nothing at all reaches stdout
+   unless a terminal is watching, which is what keeps the plain "  1) Name"
+   line the e2e suite reads byte for byte. A project with no issues gets no
+   bar either: an empty meter says less than the absence of one. */
+static void project_progress(const char *project_id) {
+    if (!render_decorate()) return;
+
+    issue_t *issues = NULL;
+    int n = issue_service_list(project_id, &issues);
+    if (n > 0) {
+        int closed = 0;
+        for (int i = 0; i < n; i++)
+            if (issues[i].status == STATUS_CLOSED) closed++;
+        char bar[64];
+        render_meter(bar, sizeof(bar), closed, n, 12, render_utf8());
+        printf("  %s%s%s %d/%d closed",
+               render_style(closed == n ? RENDER_OK : RENDER_ACCENT),
+               bar, render_reset(), closed, n);
+    }
+    free(issues);
 }
 
 /* Renders one issue in full: header line, description, then labels,
@@ -116,7 +152,9 @@ static void print_issue(const issue_t *is) {
         for (int j = 0; j < ln; j++) {
             if (strcmp(labels[j].id, is->label_ids[i]) == 0) { name = labels[j].name; break; }
         }
-        printf(" %s", name);
+        /* Colored off the name, since a label row has no color column of its
+           own. Same name, same color, every screen. */
+        printf(" %s%s%s", render_style(render_slot_for_label(name)), name, render_reset());
     }
     printf("\n");
     free(labels);
@@ -159,8 +197,10 @@ static void screen_issue_detail(const char *issue_id) {
         snprintf(title, sizeof(title), "Issue #%d", is.issue_number);
         screen_header(title);
         print_issue(&is);
-        printf("\nt) toggle status   l) add label   a) assign user   "
-               "m) add comment   0) back\n> ");
+        printf("\n");
+        render_help_row("t) toggle status   l) add label   a) assign user   "
+                        "m) add comment   0) back");
+        printf("> ");
         if (!read_line(line, sizeof(line))) return;
 
         if (line[0] == 't' || line[0] == 'T') {
@@ -174,7 +214,10 @@ static void screen_issue_detail(const char *issue_id) {
                 printf("could not read from the database\n");
             } else {
                 printf("labels:\n");
-                for (int i = 0; i < ln; i++) printf("  %d) %s\n", i + 1, labels[i].name);
+                for (int i = 0; i < ln; i++)
+                    printf("  %d) %s%s%s\n", i + 1,
+                           render_style(render_slot_for_label(labels[i].name)),
+                           labels[i].name, render_reset());
                 printf("label #: ");
                 if (read_line(line, sizeof(line))) {
                     int idx = ui_parse_choice(line);
@@ -240,7 +283,8 @@ static void screen_issues(const char *project_id, const char *project_name) {
             printf("  %d) #%d [%s] %s\n", i + 1, issues[i].issue_number,
                    issues[i].status == STATUS_OPEN ? "open" : "closed", issues[i].title);
         }
-        printf("  c) create   s) search   f) filter   0) back\n> ");
+        render_help_row("  c) create   s) search   f) filter   0) back");
+        printf("> ");
         if (!read_line(line, sizeof(line))) { free(issues); return; }
 
         if (line[0] == 'c' || line[0] == 'C') {
@@ -320,8 +364,13 @@ static void screen_projects(void) {
         screen_header("Projects");
         if (n < 0) printf("could not read from the database\n");
         else if (n == 0) printf("(no projects yet)\n");
-        for (int i = 0; i < n; i++) printf("  %d) %s\n", i + 1, projects[i].name);
-        printf("  c) create   0) back\n> ");
+        for (int i = 0; i < n; i++) {
+            printf("  %d) %s", i + 1, projects[i].name);
+            project_progress(projects[i].id);
+            printf("\n");
+        }
+        render_help_row("  c) create   0) back");
+        printf("> ");
         if (!read_line(line, sizeof(line))) { free(projects); return; }
 
         if (line[0] == 'c' || line[0] == 'C') {
@@ -363,12 +412,15 @@ static void screen_labels(void) {
         if (n < 0) printf("could not read from the database\n");
         else if (n == 0) printf("(no labels yet)\n");
         for (int i = 0; i < n; i++) {
-            printf("  %d) %s", i + 1, labels[i].name);
+            printf("  %d) %s%s%s", i + 1,
+                   render_style(render_slot_for_label(labels[i].name)),
+                   labels[i].name, render_reset());
             if (labels[i].description[0]) printf(" - %s", labels[i].description);
             printf("\n");
         }
         free(labels);
-        printf("  c) create   0) back\n> ");
+        render_help_row("  c) create   0) back");
+        printf("> ");
         if (!read_line(line, sizeof(line))) return;
 
         if (line[0] == 'c' || line[0] == 'C') {
@@ -403,7 +455,8 @@ static void screen_assignees(void) {
         else if (n == 0) printf("(no users found, the database may not be saving)\n");
         for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
         free(users);
-        printf("  c) create   0) back\n> ");
+        render_help_row("  c) create   0) back");
+        printf("> ");
         if (!read_line(line, sizeof(line))) return;
 
         if (line[0] == 'c' || line[0] == 'C') {
@@ -501,7 +554,9 @@ void menu_run(void) {
         const char *gh_user = github_service_username();
         if (gh_user[0]) printf("4) Log out (%s)\n", gh_user);
         else printf("4) GitHub login\n");
-        printf("5) My repos\n0) Quit\n> ");
+        printf("5) My repos\n");
+        render_help_row("0) Quit");
+        printf("> ");
         if (!read_line(line, sizeof(line))) return;   // stdin closed, act like Quit
 
         switch (ui_parse_choice(line)) {

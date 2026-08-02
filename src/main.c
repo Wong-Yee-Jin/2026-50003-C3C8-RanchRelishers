@@ -1,6 +1,8 @@
 #include "db.h"
+#include "render.h"
 #include "ui/menu.h"
 #include <curl/curl.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -9,6 +11,14 @@
    loop. The database path comes from DB_PATH so tests and graders can point at a
    scratch file without editing code. */
 int main(void) {
+    /* A C program starts in the "C" locale no matter what LANG says, and in
+       that locale nothing multibyte decodes. Without this the box and meter
+       glyphs would measure as three columns each and every rule would come
+       out the wrong length, so the locale has to be picked up before anything
+       draws. LC_CTYPE alone, since number and date formatting are not ours
+       to change. */
+    setlocale(LC_CTYPE, "");
+
     /* The menu prints most of its prompts without a trailing newline and never
        flushes. glibc drains stdout before a read on stdin, but Darwin's libc
        does not, so on a Mac the question can sit in the buffer while fgets
@@ -32,6 +42,12 @@ int main(void) {
         return 1;
     }
     db_labels_seed();
+
+    /* Everything above can still fail and print to stderr on the screen the
+       user was already looking at. From here on the app owns the screen, and
+       render_screen_enter arranges for it to be handed back on exit or on a
+       signal. Piped runs get none of this. */
+    render_screen_enter();
     menu_run();
     db_shutdown();
     curl_global_cleanup();
