@@ -95,6 +95,15 @@ package "Control (core services)" {
     +auth_ctx_user() : const char*
     +auth_ctx_is_authed() : bool
   }
+
+  class github_service <<src/core/github_service.c>> {
+    +github_service_resume() : gh_svc_result_t
+    +github_service_login_start(out : gh_login_prompt_t*) : gh_svc_result_t
+    +github_service_login_wait(token_saved : bool*) : gh_svc_result_t
+    +github_service_logout() : void
+    +github_service_username() : const char*
+    +github_service_repos(names : char[][128], max : int, count : int*) : gh_svc_result_t
+  }
 }
 
 package "Integration (GitHub)" {
@@ -102,7 +111,7 @@ package "Integration (GitHub)" {
     +github_device_start(out : gh_device_t*) : gh_status_t
     +github_device_poll(device_code : const char*, token_out : char*, n : size_t) : gh_status_t
     +github_parse_token_response(body : const char*, token_out : char*, n : size_t) : gh_status_t
-    +github_fetch_and_upsert_user(token : const char*, out : user_t*, rejected : bool*) : bool
+    +github_fetch_user(token : const char*, out : gh_profile_t*, rejected : bool*) : bool
     +github_list_repos(token : const char*, names : char[][], max : int) : int
     +github_parse_repo_names(body : const char*, names : char[][], max : int) : int
   }
@@ -208,9 +217,7 @@ menu ..> issue_service
 menu ..> label_service
 menu ..> user_service
 menu ..> comment_service
-menu ..> github
-menu ..> token_store
-menu ..> auth_ctx
+menu ..> github_service
 menu ..> render
 render ..> assets
 
@@ -219,6 +226,7 @@ issue_service   ..> auth_ctx
 label_service   ..> auth_ctx
 user_service    ..> auth_ctx
 comment_service ..> auth_ctx
+github_service  ..> auth_ctx
 
 project_service ..> db
 issue_service   ..> db
@@ -226,9 +234,12 @@ label_service   ..> db
 user_service    ..> db
 comment_service ..> db
 
+github_service ..> github
+github_service ..> token_store
+github_service ..> db      : db_user_upsert_github,\ndb_user_find_local, db_user_create
+
 github ..> json
-github ..> db            : db_user_upsert_github
-db     ..> util          : id_generate
+db     ..> util           : id_generate
 
 db ..> project_t
 db ..> issue_t
@@ -239,9 +250,13 @@ db ..> comment_t
 note as N1
   Layering holds without exception:
   menu.c calls only *_service functions,
-  never db_* directly. Every mutating
+  including github_service, never db_*
+  or github_* directly. Every mutating
   service checks auth_ctx_is_authed()
   before it reaches the database.
+  github.c itself never touches the
+  database; github_service owns that
+  boundary and the local-user fallback.
 end note
 
 @enduml
