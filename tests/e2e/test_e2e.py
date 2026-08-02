@@ -152,9 +152,17 @@ class E2ETests(AppTestCase):
     # alongside this suite; skipped cleanly if that hasn't shown up yet.
     @unittest.skipUnless(ASSIGNEE_CREATE_SUPPORTED, "Assignees screen has no 'c) create' option in this build")
     def test_assign_user_to_issue(self):
-        script = ("3\nc\nalice\n0\n"
-                   "1\nc\nProjA\n1\nc\nBug1\ndesc\n1\na\n1\n0\n0\n0\n0\n")
-        result = self.run_app(script)
+        # Two runs against the same scratch database, because the picker
+        # numbers users by sort order and the session's own "local" user is in
+        # that list too. The first run sets the fixture up and opens the picker
+        # just to read alice's number off it; the second sends that number. A
+        # hardcoded 1 only works while alice sorts ahead of every other user.
+        setup = self.run_app("3\nc\nalice\n0\n"
+                             "1\nc\nProjA\n1\nc\nBug1\ndesc\n1\na\n0\n0\n0\n0\n")
+        picked = re.search(r"^\s*(\d+)\) alice$", setup.stdout, re.M)
+        self.assertIsNotNone(picked, "alice never showed up in the assignee picker")
+
+        result = self.run_app(f"1\n1\n1\na\n{picked.group(1)}\n0\n0\n0\n0\n")
         self.assertIn("assignees: alice", result.stdout)
 
     # ---- Known defect: filter-by-label wants a raw 24-char hex label id, ----

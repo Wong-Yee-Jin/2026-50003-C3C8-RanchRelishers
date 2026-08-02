@@ -57,6 +57,13 @@ bool db_user_name_exists(const char *username);
 bool db_user_create(const char *username, user_t *out);
 int  db_user_list(user_t **out_list);
 bool db_user_find_by_id(const char *id, user_t *out);
+
+/* Find the local, non-GitHub user by that name, which is how an offline
+   session finds the row it signs in as. Breaks the usual bool return: 1 when
+   the row is there, 0 when it is genuinely absent, -1 when the query failed.
+   A caller that creates the row on a miss has to tell those last two apart, or
+   a database that errors once leaves it with two local users. */
+int  db_user_find_local(const char *username, user_t *out);
 bool db_issue_assign_user(const char *issue_id, const char *user_id);
 
 /* ---- GitHub account linking (register + login) ---- */

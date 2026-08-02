@@ -1,8 +1,6 @@
 #include "ui/menu.h"
-#include "core/auth_ctx.h"
+#include "core/github_service.h"
 #include "core/services.h"
-#include "github.h"
-#include "token_store.h"
 #include "render.h"
 #include "assets.h"
 #include <errno.h>
@@ -11,7 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 /* Strips leading blanks and any trailing whitespace fgets() left on the line
    (the newline, and a trailing \r if input ever comes from a CRLF source). */
@@ -399,8 +396,11 @@ static void screen_assignees(void) {
         user_t *users = NULL;
         int n = user_service_list(&users);
         screen_header("Assignees");
+        /* Starting a session always lands a local user, so an empty list is no
+           longer the ordinary empty state: it means that row is not there, and
+           the database is not keeping what we write to it. */
         if (n < 0) printf("could not read from the database\n");
-        else if (n == 0) printf("(no users yet)\n");
+        else if (n == 0) printf("(no users found, the database may not be saving)\n");
         for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
         free(users);
         printf("  c) create   0) back\n> ");
@@ -420,102 +420,52 @@ static void screen_assignees(void) {
     }
 }
 
-/* Tracks the GitHub username for the current process, empty when the signed
-   in identity is just the local fallback. This is what decides whether item
-   4 shows "GitHub login" or "Log out", since auth_ctx itself is authed
-   either way (local counts as signed in so the tracker works offline). */
-static char gh_username[USERNAME_LEN] = "";
-
-/* A device flow poll should not wait forever on a code nobody entered. This
-   caps it around GitHub's own 15 minute expiry at a 5 second interval, with
-   room to spare for the slow_down backoff. */
-#define GH_MAX_POLLS 180
-
-/* Startup identity: a cached token that still checks out with GitHub upgrades
-   the session to that real user. A token GitHub actually rejects (401/403)
-   is dropped so we do not keep retrying it; a transport failure (offline, DNS,
-   a stalled connection) leaves the token alone, since it says nothing about
-   whether the token is still good, and just falls back to local for this
-   session. Either way we end up signed in, local when there is no usable
-   token, so the tracker never requires a login to be useful. */
+/* Startup identity. The service always leaves us signed in, as a real GitHub
+   account when a saved token still works and as the local user otherwise, so
+   only the first case is worth announcing: the local session is the ordinary
+   way this program runs and saying so on every start would be noise. */
 static void github_resume_session(void) {
-    char token[256];
-    if (token_load(token, sizeof(token))) {
-        user_t user;
-        bool rejected = false;
-        if (github_fetch_and_upsert_user(token, &user, &rejected)) {
-            auth_ctx_set_user(user.id);
-            snprintf(gh_username, sizeof(gh_username), "%s", user.username);
-            printf("Signed in as %s\n", user.username);
-            return;
-        }
-        if (rejected) token_clear();
-    }
-    auth_ctx_set_user("local");
+    if (github_service_resume() == GH_SVC_OK)
+        printf("Signed in as %s\n", github_service_username());
 }
 
-/* Runs the device flow end to end: request a code, show it to the user to
-   enter on github.com, then poll until they approve it, deny it, or the code
-   expires. Blocks the whole menu while it waits, which is fine since there is
-   nothing else useful to do until the user has typed the code in anyway. */
+/* Walks the person through the device flow: show them where to go and what
+   to type, then block until the service hears back. The wait is the whole
+   menu's wait, which is fine, since there is nothing useful to do here until
+   they have finished in the browser anyway. */
 static void github_login(void) {
-    gh_device_t dev;
-    gh_status_t status = github_device_start(&dev);
-    if (status == GH_ERROR) {
+    gh_login_prompt_t prompt;
+    if (github_service_login_start(&prompt) != GH_SVC_OK) {
         printf("Set GH_CLIENT_ID and enable device flow on your GitHub OAuth app\n");
         return;
     }
-    printf("Open %s and enter code: %s\n", dev.verification_uri, dev.user_code);
+    printf("Open %s and enter code: %s\n", prompt.verification_uri, prompt.user_code);
 
-    int interval = dev.interval;
-    // a malformed device response could hand back an interval that busy-polls
-    // or, cast to unsigned for sleep(), sleeps for close to forever
-    if (interval < 1 || interval > 60) interval = 5;
+    bool token_saved = true;
+    gh_svc_result_t result = github_service_login_wait(&token_saved);
+    /* Printed ahead of the outcome below because it qualifies it: the login
+       itself worked, it just will not still be there next start. */
+    if (!token_saved)
+        printf("warning: could not save the login token, you will need to sign in again next start\n");
 
-    char token[256];
-    int consecutive_errors = 0;
-    for (int poll = 0; poll < GH_MAX_POLLS; poll++) {
-        sleep((unsigned int)interval);
-        gh_status_t poll_status = github_device_poll(dev.device_code, token, sizeof(token));
-
-        if (poll_status == GH_OK) {
-            if (!token_save(token))
-                printf("warning: could not save the login token, you will need to sign in again next start\n");
-            user_t user;
-            bool rejected = false;
-            if (github_fetch_and_upsert_user(token, &user, &rejected)) {
-                auth_ctx_set_user(user.id);
-                snprintf(gh_username, sizeof(gh_username), "%s", user.username);
-                printf("Signed in as %s\n", user.username);
-            } else {
-                printf("signed in, but fetching your GitHub profile failed; try again later\n");
-            }
-            return;
-        }
-        if (poll_status == GH_SLOW_DOWN) { interval += 5; consecutive_errors = 0; continue; }
-        if (poll_status == GH_DENIED) { printf("authorization denied\n"); return; }
-        if (poll_status == GH_EXPIRED) { printf("code expired, try again\n"); return; }
-        if (poll_status == GH_ERROR) {
-            // a momentary network blip should not throw away an in-progress
-            // login; only give up after a few in a row
-            if (++consecutive_errors >= 3) {
-                printf("could not reach GitHub, try again\n");
-                return;
-            }
-            continue;
-        }
-        consecutive_errors = 0;
-        // GH_PENDING: the user has not authorized yet, poll again
+    switch (result) {
+        case GH_SVC_OK:          printf("Signed in as %s\n", github_service_username()); break;
+        case GH_SVC_NO_PROFILE:  printf("signed in, but fetching your GitHub profile failed; try again later\n"); break;
+        case GH_SVC_DENIED:      printf("authorization denied\n"); break;
+        case GH_SVC_EXPIRED:     printf("code expired, try again\n"); break;
+        case GH_SVC_UNREACHABLE: printf("could not reach GitHub, try again\n"); break;
+        case GH_SVC_TIMED_OUT:   printf("timed out waiting for authorization, try again\n"); break;
+        /* Out of reach from here: we only wait after a start that worked, and
+           LOCAL belongs to a session that never opened a flow at all. */
+        case GH_SVC_UNAVAILABLE:
+        case GH_SVC_LOCAL:       break;
     }
-    printf("timed out waiting for authorization, try again\n");
 }
 
 /* Drops the saved token and hands the session back to the same local
    identity that startup uses when there was never a token to begin with. */
 static void github_logout(void) {
-    token_clear();
-    auth_ctx_set_user("local");   // back to the local identity, still usable offline
-    gh_username[0] = '\0';
+    github_service_logout();
     printf("Logged out of GitHub\n");
 }
 
@@ -523,16 +473,17 @@ static void github_logout(void) {
    saved token, so a local-only session is told to log in first rather than
    sent to GitHub with nothing to authenticate the request. */
 static void github_repos(void) {
-    char token[256];
-    if (!token_load(token, sizeof(token))) {
-        printf("Sign in with GitHub first (menu item 4)\n");
-        return;
-    }
     char names[100][128];
-    int n = github_list_repos(token, names, 100);
-    if (n == -1) printf("could not fetch repositories\n");
-    else if (n == 0) printf("no repositories\n");
-    else for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
+    int n = 0;
+    switch (github_service_repos(names, 100, &n)) {
+        case GH_SVC_LOCAL:       printf("Sign in with GitHub first (menu item 4)\n"); break;
+        case GH_SVC_UNREACHABLE: printf("could not fetch repositories\n"); break;
+        case GH_SVC_OK:
+            if (n == 0) printf("no repositories\n");
+            for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
+            break;
+        default: break;   // the login codes never come back from a listing
+    }
 }
 
 /* Boots the session: play the splash, resume whatever GitHub identity (if
@@ -545,7 +496,10 @@ void menu_run(void) {
     for (;;) {
         screen_header("Main Menu");
         printf("1) Projects\n2) Labels\n3) Assignees\n");
-        if (gh_username[0]) printf("4) Log out (%s)\n", gh_username);
+        /* An empty username is the local session, which has nothing to log
+           out of, so item 4 offers the login instead. */
+        const char *gh_user = github_service_username();
+        if (gh_user[0]) printf("4) Log out (%s)\n", gh_user);
         else printf("4) GitHub login\n");
         printf("5) My repos\n0) Quit\n> ");
         if (!read_line(line, sizeof(line))) return;   // stdin closed, act like Quit
@@ -554,7 +508,7 @@ void menu_run(void) {
             case 1: screen_projects(); break;
             case 2: screen_labels(); break;
             case 3: screen_assignees(); break;
-            case 4: gh_username[0] ? github_logout() : github_login(); break;
+            case 4: gh_user[0] ? github_logout() : github_login(); break;
             case 5: github_repos(); break;
             case 0: return;
             default: printf("unknown choice\n");

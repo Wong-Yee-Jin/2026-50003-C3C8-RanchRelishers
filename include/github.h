@@ -55,15 +55,29 @@ bool gh_build_device_body(const char *client_id, const char *scope, char *out, s
    device_code are URL-encoded, grant_type is a fixed OAuth constant. */
 bool gh_build_poll_body(const char *client_id, const char *device_code, char *out, size_t outlen);
 
-/* GET /user with the bearer token and upsert the result into SQLite via
-   db_user_upsert_github. Reads id, login, name, and avatar_url from the
-   response. GitHub allows a null name, so a missing or null name falls back
-   to the login for the display name. Returns false on an HTTP failure, a
-   missing id or login, or a failed upsert. rejected may be NULL; when given
-   it is set true only when GitHub itself answered 401 or 403, meaning the
-   token is actually invalid rather than the request never reaching GitHub,
-   so a caller can tell a real rejection apart from a network problem. */
-bool github_fetch_and_upsert_user(const char *token, user_t *out, bool *rejected);
+/* The fields we keep from GET /user. Same widths as the user_t columns they
+   end up in, so a caller can hand them straight to the database layer. */
+typedef struct {
+    long long id;
+    char login[USERNAME_LEN];
+    char display_name[DISPLAY_NAME_LEN];
+    char avatar_url[AVATAR_URL_LEN];
+} gh_profile_t;
+
+/* GET /user with the bearer token and fill out from the response. Reads id,
+   login, name, and avatar_url. GitHub allows a null name, so a missing or
+   null name falls back to the login for the display name. Returns false on an
+   HTTP failure or a missing id or login, and on false out is left exactly as
+   the caller passed it in, so a failed fetch never leaves half a profile
+   behind to be read as a whole one. Storing the profile is the caller's job:
+   this module never touches the database.
+
+   rejected may be NULL, for a caller with nothing to do with the answer. When
+   given it is set true only when GitHub itself answered 401 or 403, meaning
+   the token is actually invalid rather than the request never reaching
+   GitHub, so a caller can tell a real rejection apart from a network
+   problem. */
+bool github_fetch_user(const char *token, gh_profile_t *out, bool *rejected);
 
 /* Pull the name field out of each object in a top-level JSON array, such as
    the body of GET /user/repos. Pure and network-free so it is unit tested

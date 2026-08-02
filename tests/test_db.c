@@ -163,6 +163,19 @@ static void test_sign_up_upserts_the_github_user(void) {
     free(ul);
 }
 
+/* The offline session finds its own user at startup, and a GitHub account that
+   happens to be named "local" is not it. Matching on the name alone would sign
+   an offline session in as that real person and file its work under them. */
+static void test_log_in_finds_the_local_user_not_a_github_namesake(void) {
+    user_t namesake, created, found;
+    TEST_ASSERT_TRUE(db_user_upsert_github(77, "local", "Local Lookalike", "", &namesake));
+    TEST_ASSERT_EQUAL_INT(0, db_user_find_local("local", &found));   // a miss, not that row
+
+    TEST_ASSERT_TRUE(db_user_create("local", &created));
+    TEST_ASSERT_EQUAL_INT(1, db_user_find_local("local", &found));
+    TEST_ASSERT_EQUAL_STRING(created.id, found.id);
+}
+
 /* ---- Use case: Create Issue ---- */
 
 static void test_create_issue_numbers_issues_per_project(void) {
@@ -288,6 +301,7 @@ int main(void) {
     RUN_TEST(test_view_labels_finds_and_lists_labels);
     RUN_TEST(test_view_labels_assigning_to_an_issue_is_idempotent);
     RUN_TEST(test_sign_up_upserts_the_github_user);
+    RUN_TEST(test_log_in_finds_the_local_user_not_a_github_namesake);
     RUN_TEST(test_create_issue_numbers_issues_per_project);
     RUN_TEST(test_create_issue_tolerates_a_null_title);
     RUN_TEST(test_close_issue_sets_status_closed);

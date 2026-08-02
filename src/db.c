@@ -330,6 +330,31 @@ bool db_user_find_by_id(const char *id, user_t *out) {
     return found;
 }
 
+/* Load the local user of that name. What makes a row the local one is having
+   no GitHub account behind it, not what it is called, so the name alone is not
+   enough to match on: usernames are not UNIQUE here, and a real person whose
+   GitHub login happens to be "local" would otherwise answer this lookup and
+   have an offline session's work filed under their name.
+
+   The three-way return is for the caller that creates the row when it is
+   missing. sqlite reports "no rows" and "the query broke" as different steps,
+   and collapsing them into false would turn a transient read failure into a
+   second local user. */
+int db_user_find_local(const char *username, user_t *out) {
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(DB,
+            "SELECT id, username, display_name, avatar_url, github_id FROM users"
+            " WHERE username=? AND github_id IS NULL",
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, username, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    if (rc == SQLITE_ROW) user_read_row(st, out);
+    sqlite3_finalize(st);
+    if (rc == SQLITE_ROW) return 1;
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
 /* Load a user by their GitHub id, which is how login re-finds an account that
    was linked on an earlier run. */
 bool db_user_find_by_github_id(long long github_id, user_t *out) {

@@ -1,6 +1,5 @@
 #include "github.h"
 #include "json.h"
-#include "db.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,10 +220,11 @@ gh_status_t github_device_poll(const char *device_code, char *token_out, size_t 
     return github_parse_token_response(resp, token_out, outlen);
 }
 
-/* Fetch the authenticated user with the token and mirror the result into our
-   local users table. The header spells out the field handling; the inline notes
-   below cover the rejection check and the null-name fallback. */
-bool github_fetch_and_upsert_user(const char *token, user_t *out, bool *rejected) {
+/* Fetch the authenticated user's profile. The header spells out the field
+   handling; the inline notes below cover the rejection check and the null-name
+   fallback. Whoever calls this decides what to do with the result, which is why
+   nothing here knows the users table exists. */
+bool github_fetch_user(const char *token, gh_profile_t *out, bool *rejected) {
     char resp[8192];
     long status = 0;
     bool ok = http_get_bearer("https://api.github.com/user", token, resp, sizeof(resp), &status);
@@ -246,11 +246,14 @@ bool github_fetch_and_upsert_user(const char *token, user_t *out, bool *rejected
     if (!json_field(resp, "name", name, sizeof(name)) || strcmp(name, "null") == 0)
         snprintf(name, sizeof(name), "%s", login);
 
-    char avatar[AVATAR_URL_LEN];
-    if (!json_field(resp, "avatar_url", avatar, sizeof(avatar)))
-        avatar[0] = '\0';
-
-    return db_user_upsert_github(id, login, name, avatar, out);
+    /* Filled in last, so a half-written profile never escapes the failures
+       above with some fields from this response and the rest left as junk. */
+    out->id = id;
+    snprintf(out->login, sizeof(out->login), "%s", login);
+    snprintf(out->display_name, sizeof(out->display_name), "%s", name);
+    if (!json_field(resp, "avatar_url", out->avatar_url, sizeof(out->avatar_url)))
+        out->avatar_url[0] = '\0';
+    return true;
 }
 
 /* Lift the name field out of each object in a /user/repos body. A thin wrapper
