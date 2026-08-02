@@ -133,6 +133,20 @@ class E2ETests(AppTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("unknown choice", result.stdout)
 
+    # ---- Over-long input line does not leak into the next prompt ----
+    # TITLE_LEN is 256, so fgets() can only take the first 255 characters of
+    # this line in one read; the rest used to sit on stdin and answer the
+    # description prompt instead of the real description typed next.
+    def test_overlong_title_does_not_leak_into_next_prompt(self):
+        title = "A" * 300
+        script = ("1\nc\nProjA\n1\nc\n" + title + "\n"
+                   "real description\n1\n0\n0\n0\n0\n")
+        result = self.run_app(script)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("A" * 255, result.stdout)              # title cut to what fgets could hold
+        self.assertIn("real description\n", result.stdout)   # tail of the title didn't eat this line
+        self.assertNotIn("unknown choice", result.stdout)    # the leaked tail used to derail the menu
+
     # ---- Assign User to Issue ----
     # Depends on the Assignees "c) create" flow another agent is landing
     # alongside this suite; skipped cleanly if that hasn't shown up yet.

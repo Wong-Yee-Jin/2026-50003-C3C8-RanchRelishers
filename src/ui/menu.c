@@ -5,6 +5,8 @@
 #include "token_store.h"
 #include "render.h"
 #include "assets.h"
+#include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,8 +37,12 @@ char *ui_trim(char *s) {
 int ui_parse_choice(const char *line) {
     if (!line || line[0] == '\0') return -1;
     char *end;
+    errno = 0;
     long v = strtol(line, &end, 10);
     if (*end != '\0') return -1;   // trailing junk means the line wasn't a plain number
+    // a value strtol had to clamp, or one that would not survive the (int)
+    // cast below, is not a real menu choice either
+    if (errno == ERANGE || v < 0 || v > INT_MAX) return -1;
     return (int)v;
 }
 
@@ -46,6 +52,14 @@ int ui_parse_choice(const char *line) {
    looping on a line that never arrives. */
 static bool read_line(char *buf, size_t n) {
     if (!fgets(buf, (int)n, stdin)) return false;
+    /* No '\n' in buf means the real line was longer than the buffer, and the
+       rest of it is still queued on stdin. Left there, it would answer the
+       NEXT prompt instead of this one, so drain it now. Skipped at EOF, since
+       there is nothing left to drain and getchar would just report EOF again. */
+    if (!strchr(buf, '\n') && !feof(stdin)) {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF) {}
+    }
     ui_trim(buf);
     return true;
 }
@@ -97,6 +111,7 @@ static void print_issue(const issue_t *is) {
        full list to print a name a person can actually read. */
     label_t *labels = NULL;
     int ln = label_service_list(&labels);
+    if (ln < 0) printf("could not read from the database\n");
     printf("labels:");
     if (is->label_count == 0) printf(" (none)");
     for (int i = 0; i < is->label_count; i++) {
@@ -111,6 +126,7 @@ static void print_issue(const issue_t *is) {
 
     user_t *users = NULL;
     int un = user_service_list(&users);
+    if (un < 0) printf("could not read from the database\n");
     printf("assignees:");
     if (is->assignee_count == 0) printf(" (none)");
     for (int i = 0; i < is->assignee_count; i++) {
@@ -125,8 +141,12 @@ static void print_issue(const issue_t *is) {
 
     comment_t *comments = NULL;
     int cn = comment_service_list(is->id, &comments);
-    printf("comments (%d):\n", cn);
-    for (int i = 0; i < cn; i++) printf("  - %s\n", comments[i].text);
+    if (cn < 0) {
+        printf("could not read from the database\n");
+    } else {
+        printf("comments (%d):\n", cn);
+        for (int i = 0; i < cn; i++) printf("  - %s\n", comments[i].text);
+    }
     free(comments);
 }
 
@@ -153,15 +173,19 @@ static void screen_issue_detail(const char *issue_id) {
         } else if (line[0] == 'l' || line[0] == 'L') {
             label_t *labels = NULL;
             int ln = label_service_list(&labels);
-            printf("labels:\n");
-            for (int i = 0; i < ln; i++) printf("  %d) %s\n", i + 1, labels[i].name);
-            printf("label #: ");
-            if (read_line(line, sizeof(line))) {
-                int idx = ui_parse_choice(line);
-                if (idx >= 1 && idx <= ln) {
-                    print_result(issue_service_add_label(issue_id, labels[idx - 1].id), "invalid request");
-                } else {
-                    printf("unknown choice\n");
+            if (ln < 0) {
+                printf("could not read from the database\n");
+            } else {
+                printf("labels:\n");
+                for (int i = 0; i < ln; i++) printf("  %d) %s\n", i + 1, labels[i].name);
+                printf("label #: ");
+                if (read_line(line, sizeof(line))) {
+                    int idx = ui_parse_choice(line);
+                    if (idx >= 1 && idx <= ln) {
+                        print_result(issue_service_add_label(issue_id, labels[idx - 1].id), "invalid request");
+                    } else {
+                        printf("unknown choice\n");
+                    }
                 }
             }
             free(labels);
@@ -169,15 +193,19 @@ static void screen_issue_detail(const char *issue_id) {
         } else if (line[0] == 'a' || line[0] == 'A') {
             user_t *users = NULL;
             int un = user_service_list(&users);
-            printf("users:\n");
-            for (int i = 0; i < un; i++) printf("  %d) %s\n", i + 1, users[i].username);
-            printf("user #: ");
-            if (read_line(line, sizeof(line))) {
-                int idx = ui_parse_choice(line);
-                if (idx >= 1 && idx <= un) {
-                    print_result(issue_service_add_assignee(issue_id, users[idx - 1].id), "invalid request");
-                } else {
-                    printf("unknown choice\n");
+            if (un < 0) {
+                printf("could not read from the database\n");
+            } else {
+                printf("users:\n");
+                for (int i = 0; i < un; i++) printf("  %d) %s\n", i + 1, users[i].username);
+                printf("user #: ");
+                if (read_line(line, sizeof(line))) {
+                    int idx = ui_parse_choice(line);
+                    if (idx >= 1 && idx <= un) {
+                        print_result(issue_service_add_assignee(issue_id, users[idx - 1].id), "invalid request");
+                    } else {
+                        printf("unknown choice\n");
+                    }
                 }
             }
             free(users);
@@ -209,7 +237,8 @@ static void screen_issues(const char *project_id, const char *project_name) {
         char title[TITLE_LEN + 16];
         snprintf(title, sizeof(title), "Issues: %s", project_name);
         screen_header(title);
-        if (n == 0) printf("(no issues yet)\n");
+        if (n < 0) printf("could not read from the database\n");
+        else if (n == 0) printf("(no issues yet)\n");
         for (int i = 0; i < n; i++) {
             printf("  %d) #%d [%s] %s\n", i + 1, issues[i].issue_number,
                    issues[i].status == STATUS_OPEN ? "open" : "closed", issues[i].title);
@@ -235,7 +264,8 @@ static void screen_issues(const char *project_id, const char *project_name) {
             issue_t *results = NULL;
             int rn = issue_service_search(project_id, kw, &results);
             printf("-- results for \"%s\" --\n", kw);
-            if (rn == 0) printf("(no matches)\n");
+            if (rn < 0) printf("could not read from the database\n");
+            else if (rn == 0) printf("(no matches)\n");
             for (int i = 0; i < rn; i++) {
                 printf("  #%d [%s] %s\n", results[i].issue_number,
                        results[i].status == STATUS_OPEN ? "open" : "closed", results[i].title);
@@ -256,7 +286,8 @@ static void screen_issues(const char *project_id, const char *project_name) {
             issue_t *results = NULL;
             int rn = issue_service_filter(project_id, status_arg, label_arg, &results);
             printf("-- filtered issues --\n");
-            if (rn == 0) printf("(no matches)\n");
+            if (rn < 0) printf("could not read from the database\n");
+            else if (rn == 0) printf("(no matches)\n");
             for (int i = 0; i < rn; i++) {
                 printf("  #%d [%s] %s\n", results[i].issue_number,
                        results[i].status == STATUS_OPEN ? "open" : "closed", results[i].title);
@@ -290,7 +321,8 @@ static void screen_projects(void) {
         project_t *projects = NULL;
         int n = project_service_list(&projects);
         screen_header("Projects");
-        if (n == 0) printf("(no projects yet)\n");
+        if (n < 0) printf("could not read from the database\n");
+        else if (n == 0) printf("(no projects yet)\n");
         for (int i = 0; i < n; i++) printf("  %d) %s\n", i + 1, projects[i].name);
         printf("  c) create   0) back\n> ");
         if (!read_line(line, sizeof(line))) { free(projects); return; }
@@ -331,7 +363,8 @@ static void screen_labels(void) {
         label_t *labels = NULL;
         int n = label_service_list(&labels);
         screen_header("Labels");
-        if (n == 0) printf("(no labels yet)\n");
+        if (n < 0) printf("could not read from the database\n");
+        else if (n == 0) printf("(no labels yet)\n");
         for (int i = 0; i < n; i++) {
             printf("  %d) %s", i + 1, labels[i].name);
             if (labels[i].description[0]) printf(" - %s", labels[i].description);
@@ -366,7 +399,8 @@ static void screen_assignees(void) {
         user_t *users = NULL;
         int n = user_service_list(&users);
         screen_header("Assignees");
-        if (n == 0) printf("(no users yet)\n");
+        if (n < 0) printf("could not read from the database\n");
+        else if (n == 0) printf("(no users yet)\n");
         for (int i = 0; i < n; i++) printf("  - %s\n", users[i].username);
         free(users);
         printf("  c) create   0) back\n> ");
@@ -501,11 +535,10 @@ static void github_repos(void) {
     else for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
 }
 
-/* Boots the session: nudge the terminal to a usable size, play the splash,
-   resume whatever GitHub identity (if any) was saved from last time, then
-   loop the main menu until the user quits or stdin runs out. */
+/* Boots the session: play the splash, resume whatever GitHub identity (if
+   any) was saved from last time, then loop the main menu until the user
+   quits or stdin runs out. */
 void menu_run(void) {
-    render_request_size();
     render_splash();
     github_resume_session();
     char line[64];

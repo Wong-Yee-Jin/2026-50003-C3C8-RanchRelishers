@@ -48,6 +48,13 @@ class AppTestCase(unittest.TestCase):
             # Without a client id the device flow fails immediately instead of
             # reaching the network, which is what we want for an offline test.
             "GH_CLIENT_ID": "",
+            # stdout is a pipe here, so render_query_size() can't ask the
+            # kernel for a real size and falls back to these env vars. Pinning
+            # them to the 80x24 full-render threshold means a developer's own
+            # exported COLUMNS can't flip the render mode and break the
+            # header-splitting tests below.
+            "COLUMNS": "80",
+            "LINES": "24",
         }
 
     def run_app(self, stdin_script, db_path=None):

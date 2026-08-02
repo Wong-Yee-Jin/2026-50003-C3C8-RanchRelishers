@@ -12,6 +12,10 @@
    already checked out. */
 typedef enum { SVC_OK, SVC_INVALID, SVC_DENIED, SVC_NOT_FOUND, SVC_DB_ERROR } svc_result_t;
 
+/* The list/search/filter reads below hand back an int instead: the row count
+   on success, 0 for a genuinely empty result, or -1 when the database read
+   itself failed, so a caller can tell "nothing here" apart from "couldn't check." */
+
 /* ---- Projects ----
    Creating a project is the only write; listing and fetching by id are
    open reads. */

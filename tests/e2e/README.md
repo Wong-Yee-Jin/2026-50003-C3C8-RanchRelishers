@@ -28,8 +28,9 @@ issues start again at #1), empty states (`(no projects yet)`, `(no issues yet)`)
 and invalid menu input not crashing the app.
 
 `test_assign_user_to_issue` is guarded with `unittest.skipUnless` on a probe of
-the Assignees screen's own text, since the `c) create` username flow it needs
-was landing in parallel with this suite.
+the Assignees screen's own text. The `c) create` username flow it needs has
+since landed (commit 1676e02), so the guard always passes now. It stays in
+place as a leftover safety check rather than being removed.
 
 ## Known defects (not weakened, marked instead)
 
