@@ -28,11 +28,6 @@ render_mode_t render_mode(void);
    test that just want the live decision. */
 bool render_color(void);
 
-/* Emits ESC[8;24;80t when stdout is a tty, asking the terminal to resize to
-   80x24. Most terminals ignore this, so callers must re-query the size
-   afterward rather than assume it worked. A no-op when stdout is not a tty. */
-void render_request_size(void);
-
 /* ANSI helpers for the menu to print unconditionally. Each returns its escape
    code when render_color() is true and an empty string otherwise, so a
    caller never needs an if around them. */
@@ -47,7 +42,9 @@ const char *render_reset(void);
 void splash_render_frame(int frame, int total);
 
 /* Plays the animated intro once in FULL mode, prints the static compact logo
-   in COMPACT, and does nothing in MINIMAL. Skippable on any keypress.
+   in COMPACT, and does nothing in MINIMAL. Skippable on any keypress,
+   Ctrl-C included: it skips the animation rather than quitting, since killing
+   the process mid-splash is what would strand the terminal in raw mode.
    A no-op unless both stdin and stdout are ttys, so piped runs never see it
    or block on it. Restores stdin's termios before returning on every path. */
 void render_splash(void);

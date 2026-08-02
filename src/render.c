@@ -73,14 +73,6 @@ bool render_color(void) {
     return render_color_for(isatty(STDOUT_FILENO), getenv("NO_COLOR"));
 }
 
-void render_request_size(void) {
-    /* Fire-and-forget: most terminals ignore a resize request, and we
-       re-query afterward regardless, so there is nothing to check here. */
-    if (isatty(STDOUT_FILENO)) {
-        write(STDOUT_FILENO, "\x1b[8;24;80t", 10);
-    }
-}
-
 /* Escape codes gated on render_color(), returning "" otherwise, so a printf
    call site never needs its own if around them. This one is the highlight
    used for the wordmark and screen titles. */
@@ -159,6 +151,10 @@ static bool wait_for_key(int ms) {
         if (read(STDIN_FILENO, &discard, 1) < 0) { /* nothing to do, still treat as skipped */ }
         return true;
     }
+    /* A -1 return (EINTR from a signal) lands here with the plain timeout, and
+       that is what we want. The caller just moves on to the next frame, so the
+       only cost is one frame holding for less than its full 120ms. Nothing in
+       the tree installs a signal handler, so this is close to unreachable. */
     return false;
 }
 
@@ -188,9 +184,21 @@ void render_splash(void) {
     }
     /* Canonical mode buffers input by line and echoes it, neither of which
        works for polling a single skip keypress mid-animation. VMIN/VTIME 0
-       makes reads non-blocking so wait_for_key's select can own the timing. */
+       makes reads non-blocking so wait_for_key's select can own the timing.
+
+       ISIG goes too, so Ctrl-C during the animation arrives as an ordinary
+       0x03 byte instead of a SIGINT. Nothing here handles signals, so the
+       default SIGINT would kill us between the two tcsetattr calls and hand
+       the user back a shell with no echo. As a plain byte it counts as the
+       skip keypress, which is what someone mashing Ctrl-C is asking for, and
+       the restore below still runs. The same reasoning covers Ctrl-Z and
+       Ctrl-backslash: a suspend mid-raw-mode leaves the terminal just as
+       broken as a kill would, so SUSP and QUIT get the same plain-byte
+       treatment. A SIGTERM or a kill inside the ~1.6s window does still
+       leave raw mode behind; that exposure is the same one every
+       full-screen terminal app carries and is not worth a handler. */
     struct termios raw = saved;
-    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_lflag &= ~(ICANON | ECHO | ISIG);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
