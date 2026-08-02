@@ -14,3 +14,8 @@ issues.db
 # Agent and tool state
 .omc/
 .superpowers/
+
+# reference clones for TUI study, never committed
+/btop/
+/cava/
+/termbox2/
