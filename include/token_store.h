@@ -15,14 +15,18 @@
    when neither XDG_CONFIG_HOME nor HOME is usable, or out is too small. */
 bool token_path(char *out, size_t outlen);
 
-/* Store token at 0600, creating the parent directory (0700) first. Returns
-   false if the directory or file cannot be created or the write is short, so
-   a caller never mistakes a failed save for a cached login. */
+/* Store token at 0600, creating the parent directory (0700) first. The write
+   goes through a temp file and an atomic rename, so a save that is
+   interrupted partway (disk full, a signal) can never leave a corrupt
+   partial token in place of a good one. Returns false for a NULL or empty
+   token, and if the directory or file cannot be created or the write cannot
+   complete, so a caller never mistakes a failed save for a cached login. */
 bool token_save(const char *token);
 
 /* Load the saved token into out, stripping one trailing newline. Returns
-   false when no token file exists, distinguishing "never logged in" from an
-   empty token. */
+   false when there is no usable token: the file does not exist, or it exists
+   but is empty or newline-only, so a caller never mistakes an empty or
+   corrupt token file for a real cached login. */
 bool token_load(char *out, size_t outlen);
 
 /* Remove the token file, e.g. on logout. A missing file is not an error. */
