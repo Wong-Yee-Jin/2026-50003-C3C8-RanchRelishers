@@ -28,10 +28,10 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
 
 /* Headers every GitHub call needs. GitHub rejects requests without a
    User-Agent, and we want JSON back rather than the form-encoded default the
-   token endpoint would otherwise return. */
+   token endpoint would otherwise return. Returns NULL on allocation failure,
+   which callers must treat as a hard failure, not as "no extra headers". */
 static struct curl_slist *common_headers(struct curl_slist *h) {
-    h = curl_slist_append(h, "Accept: application/json");
-    return h;
+    return curl_slist_append(h, "Accept: application/json");
 }
 
 /* The shared tail of both the POST and GET helpers: set the options every
@@ -58,6 +58,10 @@ static bool http_post_form(const char *url, const char *body, char *out, size_t 
     if (!curl) return false;
     resp_buf r = { out, 0, outlen - 1 };
     struct curl_slist *headers = common_headers(NULL);
+    if (!headers) {
+        curl_easy_cleanup(curl);
+        return false;
+    }
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     bool ok = perform(curl, headers, &r);
@@ -84,9 +88,32 @@ http_get_bearer(const char *url, const char *token, char *out, size_t outlen,
     /* The token rides only in this Authorization header, never in the URL or a
        log line, so it stays out of shell history and any server access log. */
     char auth[512];
-    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", token);
+    int auth_len = snprintf(auth, sizeof(auth), "Authorization: Bearer %s", token);
+    /* Unreachable with any real GitHub token, but this file's rule is that a
+       truncated buffer is a hard failure everywhere, not just where it is
+       likely: a silently clipped token would be sent as a different, wrong
+       one instead of failing loudly. */
+    if (auth_len < 0 || (size_t)auth_len >= sizeof(auth)) {
+        curl_easy_cleanup(curl);
+        return false;
+    }
     struct curl_slist *headers = common_headers(NULL);
-    headers = curl_slist_append(headers, auth);
+    if (!headers) {
+        curl_easy_cleanup(curl);
+        return false;
+    }
+    /* curl_slist_append can hand back NULL on allocation failure, and on that
+       path it leaves the list we passed in untouched, so headers still owns
+       it and has to be freed here rather than lost. Falling through with
+       headers unchanged would send the request with no Authorization header
+       instead of failing, which is worse than not sending it at all. */
+    struct curl_slist *with_auth = curl_slist_append(headers, auth);
+    if (!with_auth) {
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        return false;
+    }
+    headers = with_auth;
     curl_easy_setopt(curl, CURLOPT_URL, url);
     bool ok = perform(curl, headers, &r);
     if (ok && http_status)
@@ -113,6 +140,44 @@ gh_status_t github_parse_token_response(const char *body, char *token_out, size_
     return GH_ERROR;
 }
 
+/* curl_easy_escape only ignores a NULL handle from libcurl 7.82.0 onward; the
+   README targets Ubuntu 22.04, which ships 7.81.0. So every escape here runs
+   against a scratch handle opened just for that, never NULL. */
+static bool
+url_encode(const char *in, char *out, size_t outlen) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return false;
+    char *enc = curl_easy_escape(curl, in, 0);
+    bool ok = false;
+    if (enc) {
+        int len = snprintf(out, outlen, "%s", enc);
+        ok = len >= 0 && (size_t)len < outlen;
+    }
+    curl_free(enc);
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+bool gh_build_device_body(const char *client_id, const char *scope, char *out, size_t outlen) {
+    char enc_id[256], enc_scope[256];
+    if (!url_encode(client_id, enc_id, sizeof(enc_id))) return false;
+    if (!url_encode(scope, enc_scope, sizeof(enc_scope))) return false;
+    /* A truncated body is a malformed request, not a smaller valid one: fail
+       here rather than let it out and have it read like a network error. */
+    int len = snprintf(out, outlen, "client_id=%s&scope=%s", enc_id, enc_scope);
+    return len >= 0 && (size_t)len < outlen;
+}
+
+bool gh_build_poll_body(const char *client_id, const char *device_code, char *out, size_t outlen) {
+    char enc_id[256], enc_code[256];
+    if (!url_encode(client_id, enc_id, sizeof(enc_id))) return false;
+    if (!url_encode(device_code, enc_code, sizeof(enc_code))) return false;
+    int len = snprintf(out, outlen,
+             "client_id=%s&device_code=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code",
+             enc_id, enc_code);
+    return len >= 0 && (size_t)len < outlen;
+}
+
 /* Open the device flow by requesting a code pair from GitHub. The client id and
    scope are read from the environment (GH_CLIENT_ID, GH_SCOPE) so no secret is
    compiled into the binary and another deployment can supply its own. A missing
@@ -123,8 +188,8 @@ gh_status_t github_device_start(gh_device_t *out) {
     const char *scope = getenv("GH_SCOPE");
     if (!scope || !*scope) scope = "read:user";
 
-    char body[256];
-    snprintf(body, sizeof(body), "client_id=%s&scope=%s", client_id, scope);
+    char body[512];
+    if (!gh_build_device_body(client_id, scope, body, sizeof(body))) return GH_ERROR;
 
     char resp[2048];
     if (!http_post_form("https://github.com/login/device/code", body, resp, sizeof(resp)))
@@ -147,12 +212,8 @@ gh_status_t github_device_poll(const char *device_code, char *token_out, size_t 
     const char *client_id = getenv("GH_CLIENT_ID");
     if (!client_id || !*client_id) return GH_ERROR;
 
-    /* The grant_type is a fixed OAuth constant and the two values are ASCII
-       tokens GitHub gave us, so no URL-encoding is needed for this body. */
-    char body[256];
-    snprintf(body, sizeof(body),
-             "client_id=%s&device_code=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code",
-             client_id, device_code);
+    char body[512];
+    if (!gh_build_poll_body(client_id, device_code, body, sizeof(body))) return GH_ERROR;
 
     char resp[2048];
     if (!http_post_form("https://github.com/login/oauth/access_token", body, resp, sizeof(resp)))

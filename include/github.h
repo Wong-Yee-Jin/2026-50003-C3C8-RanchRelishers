@@ -41,6 +41,20 @@ gh_status_t github_device_start(gh_device_t *out);
    terminal error. */
 gh_status_t github_device_poll(const char *device_code, char *token_out, size_t outlen);
 
+/* Build the device-code request body. client_id and scope are operator
+   supplied, not a fixed constant, so both are URL-encoded before going into
+   the form body: an unescaped & or = in either would splice in an extra
+   parameter instead of being taken as a literal value. Returns false on an
+   escape failure or if the encoded body would not fit in outlen, a truncated
+   body is a malformed request rather than a smaller valid one. Split out from
+   github_device_start so the encoding and the truncation guard are unit
+   tested without a live request. */
+bool gh_build_device_body(const char *client_id, const char *scope, char *out, size_t outlen);
+
+/* Same shape as gh_build_device_body, for the token-poll body: client_id and
+   device_code are URL-encoded, grant_type is a fixed OAuth constant. */
+bool gh_build_poll_body(const char *client_id, const char *device_code, char *out, size_t outlen);
+
 /* GET /user with the bearer token and upsert the result into SQLite via
    db_user_upsert_github. Reads id, login, name, and avatar_url from the
    response. GitHub allows a null name, so a missing or null name falls back
