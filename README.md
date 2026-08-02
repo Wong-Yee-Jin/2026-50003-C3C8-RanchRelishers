@@ -34,7 +34,15 @@ The database path comes from the `DB_PATH` environment variable. If unset, it de
 DB_PATH=/path/to/mydata.db ./mini-gh-tracker
 ```
 
-The menu lets you create and browse projects, issues, labels, users, and comments.
+The menu lets you create and browse projects, issues, labels, users, and comments. The projects screen shows a small progress meter next to each project (closed issues out of the total), and every screen ends with a help row listing what its keys do.
+
+### Terminal presentation
+
+Color depth is detected automatically: `COLORTERM=truecolor` or `24bit` gives full color, a `TERM` containing `256color` gives 256 colors, anything else falls back to 16 colors. `NO_COLOR` (any non-empty value) disables color outright regardless of what the terminal reports.
+
+The app switches to the terminal's alternate screen on start and restores your original screen on exit, including on Ctrl-C. Borders and meters use box-drawing and block characters when the locale is UTF-8, and fall back to plain ASCII otherwise.
+
+None of this shows up when the program is not attached to a terminal: piped or scripted runs, including the e2e suite and any shell script, get plain undecorated text with no escape codes at all, so their output stays stable.
 
 ### Environment variables
 
