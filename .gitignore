@@ -9,3 +9,7 @@ issues.db
 
 # macOS
 .DS_Store
+
+# Agent and tool state
+.omc/
+.superpowers/
