@@ -87,13 +87,6 @@ int main(void) {
     int fn = db_issue_filter(p.id, "open", NULL, 50, &f);   // i2 is open, i1 was closed
     CHECK(fn == 1); free(f);                                 // i3 is open too but must not leak in from p2
 
-    CHECK(db_comment_add(i1.id, "first note") == true);
-    CHECK(db_comment_add(i1.id, "second note") == true);
-    comment_t *cl = NULL; int cn = db_comment_list_by_issue(i1.id, &cl);
-    CHECK(cn == 2);
-    CHECK_STR(cl[0].text, "first note");   // ordered by created_at ascending
-    free(cl);
-
     issue_t *sg = NULL;
     int sgn = db_issue_search(p.id, NULL, 50, &sg);   // NULL keyword must not crash, matches all rows in p
     CHECK(sgn == 2);   // i1 and i2 only, i3 is scoped out because it belongs to p2

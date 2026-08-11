@@ -2,6 +2,7 @@
 mini-gh-tracker
 build/
 *.o
+.env
 
 # Local database files
 issues.db

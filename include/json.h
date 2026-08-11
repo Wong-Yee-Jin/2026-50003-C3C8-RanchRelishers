@@ -25,4 +25,10 @@ long json_field_int(const char *body, const char *key, long dflt);
    are not objects or lack the field are skipped. */
 int json_array_objects(const char *body, const char *field, char out[][128], int max);
 
+/* Same as json_array_objects, but for an array nested one level down under
+   array_key -- e.g. GitHub's {"items":[...]} search responses -- instead of
+   a bare top-level array. */
+int json_array_field_objects(const char *body, const char *array_key,
+                              const char *field, char out[][128], int max);
+
 #endif

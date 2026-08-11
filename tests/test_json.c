@@ -57,5 +57,20 @@ int main(void) {
     /* A bare zero-length token (no value between ':' and ',') is malformed. */
     CHECK(json_field("{\"a\":,\"b\":1}", "a", buf, sizeof(buf)) == false);
 
+    /* json_array_field_objects: the array of interest lives nested one
+       level down under a key, e.g. GitHub's {"items":[...]} search shape,
+       not bare at the top level. */
+    const char *search =
+      "{\"total_count\":2,\"incomplete_results\":false,\"items\":"
+      "[{\"login\":\"octocat\",\"id\":1},{\"login\":\"defunkt\",\"id\":2}]}";
+    char logins[8][128];
+    int ln = json_array_field_objects(search, "items", "login", logins, 8);
+    CHECK(ln == 2);
+    CHECK_STR(logins[0], "octocat");
+    CHECK_STR(logins[1], "defunkt");
+
+    /* A missing array key is zero results, not a crash. */
+    CHECK(json_array_field_objects("{\"total_count\":0}", "items", "login", logins, 8) == 0);
+
     return TEST_SUMMARY();
 }
