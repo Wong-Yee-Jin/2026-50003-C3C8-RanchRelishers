@@ -26,7 +26,7 @@ all: $(BIN)
 # still prints compile commands as usual.
 run:
 	@$(MAKE) --no-print-directory -s $(BIN)
-	./$(BIN)
+	@./$(BIN)
 
 $(BIN): $(OBJ)
 	$(CC) $(OBJ) -o $@ $(LDFLAGS)

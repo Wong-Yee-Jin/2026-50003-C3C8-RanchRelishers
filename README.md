@@ -32,6 +32,12 @@ This produces the `mini-gh-tracker` binary.
 ./mini-gh-tracker
 ```
 
+or
+
+```bash
+make run
+```
+
 The database path comes from the `DB_PATH` environment variable. If unset, it defaults to `issues.db` in the current directory.
 
 ```bash

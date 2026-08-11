@@ -11,7 +11,6 @@
 #define TITLE_LEN 256
 /* Issue bodies get the largest field because they carry pasted GitHub text. */
 #define DESC_LEN 2048
-#define COMMENT_LEN 1024
 #define STATUS_LEN 8
 /* An issue caches at most this many labels and assignees in memory; the read
    loops in db.c stop at these numbers so the fixed arrays cannot overflow. */
@@ -40,13 +39,6 @@ typedef struct {
     char name[NAME_LEN];
     char description[LABEL_DESC_LEN];
 } label_t;
-
-/* A comment as the UI needs to show it: id and body only. The issue link and
-   created_at timestamp stay in the comments table and are not carried here. */
-typedef struct {
-    char id[ID_LEN];
-    char text[COMMENT_LEN];
-} comment_t;
 
 /* A person who can be assigned to issues. A locally created user has only a
    username; display_name, avatar_url and github_id fill in when the account is

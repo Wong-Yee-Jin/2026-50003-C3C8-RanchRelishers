@@ -85,9 +85,9 @@ static void screen_header(const char *title) {
     }
 }
 
-/* Renders one issue in full: header line, description, then labels,
-   assignees and comments resolved from the ids stored on the issue into
-   names a person reads on screen. */
+/* Renders one issue in full: header line, description, then labels and
+   assignees resolved from the ids stored on the issue into names a person
+   reads on screen. */
 static void print_issue(const issue_t *is) {
     printf("\n#%d %s [%s]\n", is->issue_number, is->title,
            is->status == STATUS_OPEN ? "open" : "closed");
@@ -122,19 +122,16 @@ static void print_issue(const issue_t *is) {
     }
     printf("\n");
     free(users);
-
-    comment_t *comments = NULL;
-    int cn = comment_service_list(is->id, &comments);
-    printf("comments (%d):\n", cn);
-    for (int i = 0; i < cn; i++) printf("  - %s\n", comments[i].text);
-    free(comments);
 }
 
 /* Action screen for a single issue. Re-fetches the issue at the top of every
    loop pass instead of holding onto the struct across an edit, so a status
-   toggle or a new comment shows up on the very next redraw. */
+   toggle shows up on the very next redraw. Labels and assignees are set
+   once at issue-creation time (see prompt_labels_and_assignees) and shown
+   here read-only; the only action left on this screen is toggling
+   open/closed -- there is no comments feature anymore. */
 static void screen_issue_detail(const char *issue_id) {
-    char line[COMMENT_LEN];
+    char line[64]; /* just needs to hold "t"/"0"/junk, not free text anymore */
     for (;;) {
         issue_t is;
         if (issue_service_get(issue_id, &is) != SVC_OK) { printf("not found\n"); return; }
@@ -142,52 +139,12 @@ static void screen_issue_detail(const char *issue_id) {
         snprintf(title, sizeof(title), "Issue #%d", is.issue_number);
         screen_header(title);
         print_issue(&is);
-        printf("\nt) toggle status   l) add label   a) assign user   "
-               "m) add comment   0) back\n> ");
+        printf("\nt) toggle status   0) back\n> ");
         if (!read_line(line, sizeof(line))) return;
 
         if (line[0] == 't' || line[0] == 'T') {
             issue_status_t next = is.status == STATUS_OPEN ? STATUS_CLOSED : STATUS_OPEN;
             print_result(issue_service_set_status(issue_id, next), "invalid request");
-
-        } else if (line[0] == 'l' || line[0] == 'L') {
-            label_t *labels = NULL;
-            int ln = label_service_list(&labels);
-            printf("labels:\n");
-            for (int i = 0; i < ln; i++) printf("  %d) %s\n", i + 1, labels[i].name);
-            printf("label #: ");
-            if (read_line(line, sizeof(line))) {
-                int idx = ui_parse_choice(line);
-                if (idx >= 1 && idx <= ln) {
-                    print_result(issue_service_add_label(issue_id, labels[idx - 1].id), "invalid request");
-                } else {
-                    printf("unknown choice\n");
-                }
-            }
-            free(labels);
-
-        } else if (line[0] == 'a' || line[0] == 'A') {
-            user_t *users = NULL;
-            int un = user_service_list(&users);
-            printf("users:\n");
-            for (int i = 0; i < un; i++) printf("  %d) %s\n", i + 1, users[i].username);
-            printf("user #: ");
-            if (read_line(line, sizeof(line))) {
-                int idx = ui_parse_choice(line);
-                if (idx >= 1 && idx <= un) {
-                    print_result(issue_service_add_assignee(issue_id, users[idx - 1].id), "invalid request");
-                } else {
-                    printf("unknown choice\n");
-                }
-            }
-            free(users);
-
-        } else if (line[0] == 'm' || line[0] == 'M') {
-            printf("comment: ");
-            if (read_line(line, sizeof(line))) {
-                issue_t parent_check;   // comment_service_add dereferences this unconditionally
-                print_result(comment_service_add(issue_id, line, &parent_check), "comment cannot be blank");
-            }
 
         } else if (ui_parse_choice(line) == 0) {
             return;
@@ -195,6 +152,71 @@ static void screen_issue_detail(const char *issue_id) {
             printf("unknown choice\n");
         }
     }
+}
+
+/* Parses a "1 3 5" / "1,3,5" style multi-select line into 1-based indices,
+   writing up to max of them into out and returning how many were found.
+   Anything that doesn't parse as a positive number is silently skipped
+   rather than aborting the whole line, so one typo doesn't throw away the
+   rest of a person's picks. */
+static int parse_index_list(const char *line, int *out, int max) {
+    int n = 0;
+    const char *p = line;
+    while (*p && n < max) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        char *end;
+        long v = strtol(p, &end, 10);
+        if (end != p && v > 0) out[n++] = (int)v;
+        p = end;
+    }
+    return n;
+}
+
+/* Offers to attach label(s) and assignee(s) to a just-created issue, right
+   in the creation flow -- there's no separate "add label" / "assign user"
+   screen anymore, so this is the only place either ever gets set. Blank
+   input skips a section entirely; unknown indices are just skipped. */
+static void prompt_labels_and_assignees(const char *issue_id) {
+    label_t *labels = NULL;
+    int ln = label_service_list(&labels);
+    if (ln > 0) {
+        printf("\nlabels:\n");
+        for (int i = 0; i < ln; i++) {
+            printf("  %d) %s", i + 1, labels[i].name);
+            if (labels[i].description[0]) printf(" - %s", labels[i].description);
+            printf("\n");
+        }
+        char line[256];
+        printf("add label #s (space/comma separated, blank for none): ");
+        if (read_line(line, sizeof(line)) && line[0]) {
+            int idxs[MAX_LABELS];
+            int n = parse_index_list(line, idxs, MAX_LABELS);
+            for (int i = 0; i < n; i++) {
+                if (idxs[i] >= 1 && idxs[i] <= ln)
+                    issue_service_add_label(issue_id, labels[idxs[i] - 1].id);
+            }
+        }
+    }
+    free(labels);
+
+    user_t *users = NULL;
+    int un = user_service_list(&users);
+    if (un > 0) {
+        printf("\nassignees:\n");
+        for (int i = 0; i < un; i++) printf("  %d) %s\n", i + 1, users[i].username);
+        char line[256];
+        printf("assign user #s (space/comma separated, blank for none): ");
+        if (read_line(line, sizeof(line)) && line[0]) {
+            int idxs[MAX_ASSIGNEES];
+            int n = parse_index_list(line, idxs, MAX_ASSIGNEES);
+            for (int i = 0; i < n; i++) {
+                if (idxs[i] >= 1 && idxs[i] <= un)
+                    issue_service_add_assignee(issue_id, users[idxs[i] - 1].id);
+            }
+        }
+    }
+    free(users);
 }
 
 /* Issue list for one project, with create/search/filter and drill-down into
@@ -214,7 +236,7 @@ static void screen_issues(const char *project_id, const char *project_name) {
             printf("  %d) #%d [%s] %s\n", i + 1, issues[i].issue_number,
                    issues[i].status == STATUS_OPEN ? "open" : "closed", issues[i].title);
         }
-        printf("  c) create   s) search   f) filter   0) back\n> ");
+        printf("  c) create   s) search   0) back\n> ");
         if (!read_line(line, sizeof(line))) { free(issues); return; }
 
         if (line[0] == 'c' || line[0] == 'C') {
@@ -225,7 +247,9 @@ static void screen_issues(const char *project_id, const char *project_name) {
             printf("description: ");
             if (!read_line(desc, sizeof(desc))) return;
             issue_t created;
-            print_result(issue_service_create(project_id, new_title, desc, &created), "title cannot be blank");
+            svc_result_t r = issue_service_create(project_id, new_title, desc, &created);
+            print_result(r, "title cannot be blank");
+            if (r == SVC_OK) prompt_labels_and_assignees(created.id);
 
         } else if (line[0] == 's' || line[0] == 'S') {
             free(issues);
@@ -235,27 +259,6 @@ static void screen_issues(const char *project_id, const char *project_name) {
             issue_t *results = NULL;
             int rn = issue_service_search(project_id, kw, &results);
             printf("-- results for \"%s\" --\n", kw);
-            if (rn == 0) printf("(no matches)\n");
-            for (int i = 0; i < rn; i++) {
-                printf("  #%d [%s] %s\n", results[i].issue_number,
-                       results[i].status == STATUS_OPEN ? "open" : "closed", results[i].title);
-            }
-            free(results);
-
-        } else if (line[0] == 'f' || line[0] == 'F') {
-            free(issues);
-            char status_in[STATUS_LEN], label_in[ID_LEN];
-            printf("status (open/closed, blank for any): ");
-            if (!read_line(status_in, sizeof(status_in))) return;
-            printf("label id (blank for any): ");
-            if (!read_line(label_in, sizeof(label_in))) return;
-            /* the filter treats "" as an active filter, so a skipped field
-               must cross the service boundary as NULL, not an empty string */
-            const char *status_arg = status_in[0] ? status_in : NULL;
-            const char *label_arg = label_in[0] ? label_in : NULL;
-            issue_t *results = NULL;
-            int rn = issue_service_filter(project_id, status_arg, label_arg, &results);
-            printf("-- filtered issues --\n");
             if (rn == 0) printf("(no matches)\n");
             for (int i = 0; i < rn; i++) {
                 printf("  #%d [%s] %s\n", results[i].issue_number,
@@ -281,10 +284,33 @@ static void screen_issues(const char *project_id, const char *project_name) {
     }
 }
 
+/* Pulls the signed-in GitHub user's repos -- public and private alike,
+   github_list_repos already asks GitHub for everything the token can see --
+   and adds any repo name not already tracked as a project. Called once on
+   every visit to the Projects screen, so the list stays current with
+   GitHub without a separate "My repos" screen. A no-op without a saved
+   token, so local-only usage is unaffected; a name that's already a
+   project just comes back SVC_INVALID from project_service_create and is
+   silently skipped. */
+static void sync_projects_from_github(void) {
+    char token[256];
+    if (!token_load(token, sizeof(token))) return;
+
+    char names[100][128];
+    int n = github_list_repos(token, names, 100);
+    if (n <= 0) return;
+
+    for (int i = 0; i < n; i++) {
+        project_t created;
+        project_service_create(names[i], &created);
+    }
+}
+
 /* Top-level project list and create screen. Same discipline as the issues
    screen: the project array is freed on every branch, including a stray
    keypress that matches nothing, since it's about to be re-listed anyway. */
 static void screen_projects(void) {
+    sync_projects_from_github();
     char line[NAME_LEN];
     for (;;) {
         project_t *projects = NULL;
@@ -322,9 +348,9 @@ static void screen_projects(void) {
     }
 }
 
-/* Label list and create screen. Labels have no drill-down screen of their
-   own, so the list is freed right after it's printed instead of carrying it
-   through the branches below like screen_issues and screen_projects do. */
+/* Static label catalog display. Labels have no "create" screen of their own
+   anymore -- the full catalog is seeded once at startup (db_labels_seed)
+   and every project picks from that same fixed, shared set. */
 static void screen_labels(void) {
     char line[NAME_LEN];
     for (;;) {
@@ -338,18 +364,10 @@ static void screen_labels(void) {
             printf("\n");
         }
         free(labels);
-        printf("  c) create   0) back\n> ");
+        printf("  0) back\n> ");
         if (!read_line(line, sizeof(line))) return;
 
-        if (line[0] == 'c' || line[0] == 'C') {
-            char name[NAME_LEN], desc[LABEL_DESC_LEN];
-            printf("label name: ");
-            if (!read_line(name, sizeof(name))) return;
-            printf("description: ");
-            if (!read_line(desc, sizeof(desc))) return;
-            label_t created;
-            print_result(label_service_create(name, desc, &created), "blank or duplicate label name");
-        } else if (ui_parse_choice(line) == 0) {
+        if (ui_parse_choice(line) == 0) {
             return;
         } else {
             printf("unknown choice\n");
@@ -357,9 +375,15 @@ static void screen_labels(void) {
     }
 }
 
+#define GH_SUGGEST_MAX 5
+
 /* Same shape as screen_labels: list what's there, then let a signed-in user
-   add to it. Local creation is the only way into the assignee list without
-   a network, since GitHub login has nothing to authenticate against offline. */
+   add to it. Typing a name and pressing enter doesn't add it outright --
+   it searches GitHub for real accounts matching what was typed and shows
+   up to GH_SUGGEST_MAX suggestions to pick from, the same "type, see real
+   matches, pick one" idea as the web app's live autocomplete, just resolved
+   in one round trip instead of on every keystroke since there's no
+   keystroke-level event loop in a blocking terminal read. */
 static void screen_assignees(void) {
     char line[NAME_LEN];
     for (;;) {
@@ -373,11 +397,31 @@ static void screen_assignees(void) {
         if (!read_line(line, sizeof(line))) return;
 
         if (line[0] == 'c' || line[0] == 'C') {
-            char username[USERNAME_LEN];
-            printf("username: ");
-            if (!read_line(username, sizeof(username))) return;
+            char query[USERNAME_LEN];
+            printf("search github username: ");
+            if (!read_line(query, sizeof(query))) return;
+            if (!query[0]) { printf("unknown choice\n"); continue; }
+
+            char matches[GH_SUGGEST_MAX][128];
+            int mn = github_search_usernames(query, matches, GH_SUGGEST_MAX);
+            if (mn < 0) {
+                printf("could not reach GitHub to search usernames\n");
+                continue;
+            }
+            if (mn == 0) {
+                printf("no GitHub accounts matched \"%s\"\n", query);
+                continue;
+            }
+
+            printf("matches:\n");
+            for (int i = 0; i < mn; i++) printf("  %d) %s\n", i + 1, matches[i]);
+            printf("pick #: ");
+            if (!read_line(line, sizeof(line))) return;
+            int idx = ui_parse_choice(line);
+            if (idx < 1 || idx > mn) { printf("unknown choice\n"); continue; }
+
             user_t created;
-            print_result(user_service_create(username, &created), "name taken or empty");
+            print_result(user_service_create(matches[idx - 1], &created), "name taken or empty");
         } else if (ui_parse_choice(line) == 0) {
             return;
         } else {
@@ -485,46 +529,48 @@ static void github_logout(void) {
     printf("Logged out of GitHub\n");
 }
 
-/* Lists the signed-in user's repos straight from the GitHub API. Needs a
-   saved token, so a local-only session is told to log in first rather than
-   sent to GitHub with nothing to authenticate the request. */
-static void github_repos(void) {
-    char token[256];
-    if (!token_load(token, sizeof(token))) {
-        printf("Sign in with GitHub first (menu item 4)\n");
-        return;
-    }
-    char names[100][128];
-    int n = github_list_repos(token, names, 100);
-    if (n == -1) printf("could not fetch repositories\n");
-    else if (n == 0) printf("no repositories\n");
-    else for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
-}
-
 /* Boots the session: nudge the terminal to a usable size, play the splash,
    resume whatever GitHub identity (if any) was saved from last time, then
-   loop the main menu until the user quits or stdin runs out. */
+   loop the main menu until the user quits or stdin runs out.
+   "Logged in" here means an actual GitHub identity (gh_username set), not
+   just the local fallback auth_ctx uses to stay usable offline: someone
+   who has never signed in with GitHub sees only "GitHub login" and "Quit",
+   since Projects/Labels/Assignees now depend on GitHub as the source of
+   truth for repos and matching real usernames. Once signed in, every
+   screen is available and item 4 becomes "Log out". "My repos" no longer
+   exists as a separate screen -- repos show up automatically in Projects
+   (see sync_projects_from_github). */
 void menu_run(void) {
     render_request_size();
     render_splash();
     github_resume_session();
     char line[64];
     for (;;) {
+        bool logged_in = gh_username[0] != '\0';
         screen_header("Main Menu");
-        printf("1) Projects\n2) Labels\n3) Assignees\n");
-        if (gh_username[0]) printf("4) Log out (%s)\n", gh_username);
-        else printf("4) GitHub login\n");
-        printf("5) My repos\n0) Quit\n> ");
+        if (logged_in) {
+            printf("1) Projects\n2) Labels\n3) Assignees\n4) Log out (%s)\n0) Quit\n> ", gh_username);
+        } else {
+            printf("1) GitHub login\n0) Quit\n> ");
+        }
         if (!read_line(line, sizeof(line))) return;   // stdin closed, act like Quit
 
-        switch (ui_parse_choice(line)) {
-            case 1: screen_projects(); break;
-            case 2: screen_labels(); break;
-            case 3: screen_assignees(); break;
-            case 4: gh_username[0] ? github_logout() : github_login(); break;
-            case 5: github_repos(); break;
-            case 0: return;
-            default: printf("unknown choice\n");
+        int choice = ui_parse_choice(line);
+        if (logged_in) {
+            switch (choice) {
+                case 1: screen_projects(); break;
+                case 2: screen_labels(); break;
+                case 3: screen_assignees(); break;
+                case 4: github_logout(); break;
+                case 0: return;
+                default: printf("unknown choice\n");
+            }
+        } else {
+            switch (choice) {
+                case 1: github_login(); break;
+                case 0: return;
+                default: printf("unknown choice\n");
+            }
         }
     }
 }
