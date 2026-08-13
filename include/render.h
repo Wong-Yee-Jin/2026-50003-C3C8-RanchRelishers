@@ -54,19 +54,43 @@ typedef enum {
     RENDER_SLOT_COUNT
 } render_slot_t;
 
-/* Escape sequence for one slot at the live depth, or "" when there is no
-   color. Same promise the old render_accent made: safe to drop into any
-   printf with no guard around it. */
+/* Escape sequence for one slot at the live depth and background, or "" when
+   there is no color. Same promise the old render_accent made: safe to drop
+   into any printf with no guard around it. */
 const char *render_style(render_slot_t slot);
 
+/* Dark or light, for the two color tables render_style_into picks between.
+   There is no "unknown": an unset or unparsable COLORFGBG reads as dark,
+   which is what a color has always meant in this app until now. */
+typedef enum { RENDER_BG_DARK, RENDER_BG_LIGHT } render_background_t;
+
+/* Reads the background out of COLORFGBG's last ";"-separated field (the
+   background color index a terminal reports there). Pure, so the whole rule
+   table is unit tested with no terminal anywhere. NULL, empty, or anything
+   that doesn't parse as a plain integer reads as dark. */
+render_background_t render_background_for(const char *colorfgbg_env);
+
+/* render_background_for wired to the live COLORFGBG. */
+render_background_t render_background(void);
+
 /* The builder behind render_style, exposed so a test can ask for any slot at
-   any depth without touching the environment. Writes a NUL-terminated escape
-   into buf and hands buf back. */
-char *render_style_into(char *buf, size_t n, render_slot_t slot, render_depth_t depth);
+   any depth and background without touching the environment. Writes a
+   NUL-terminated escape into buf and hands buf back. */
+char *render_style_into(char *buf, size_t n, render_slot_t slot, render_depth_t depth,
+                        render_background_t bg);
 
 /* Nearest xterm-256 index for an RGB triple. Public for the unit test; the
    only caller in the app is the 256-color branch of render_style_into. */
 int render_rgb_to_256(int r, int g, int b);
+
+/* One column's color along a horizontal gradient running from (r0,g0,b0) at
+   col 0 to (r1,g1,b1) at col width-1. Pure integer lerp, so the two ends and
+   the midpoint are a unit test rather than a screenshot. col is clamped to
+   [0, width-1] first, so a caller that walks one column past either edge
+   still gets a color instead of a divide-by-zero or a value outside the two
+   stops. */
+void render_gradient_at(int col, int width, int r0, int g0, int b0,
+                        int r1, int g1, int b1, int *r, int *g, int *b);
 
 /* A color for a label name, picked by hashing the name so the same label
    keeps the same color across screens and across runs. Labels are local rows
@@ -87,6 +111,21 @@ bool render_utf8(void);
    count when the locale cannot decode the bytes, which is the same answer
    for plain ASCII and an over-estimate that only costs a short rule. */
 int render_display_width(const char *s);
+
+/* render_display_width for a string that may have render_style() escape
+   sequences wrapped around parts of it, such as a colored caret or a colored
+   label name. The escape bytes are skipped rather than counted, the same way
+   a terminal itself reads them. */
+int render_visible_width(const char *s);
+
+/* Truncates s to at most `cols` display columns, replacing whatever does not
+   fit with a trailing ellipsis rather than wrapping it. Never cuts a wide
+   character in half: the walk only ever commits a whole decoded character,
+   so the ellipsis takes over from wherever the last complete one landed.
+   Unicode "…" when utf8 is true, the three-dot ASCII form otherwise, writing
+   into out (outsz bytes) and returning it. A string that already fits is
+   copied through unchanged. */
+char *render_truncate(const char *s, int cols, bool utf8, char *out, size_t outsz);
 
 /* How many eighths of a cell should be filled to show done out of total
    across `cells` columns, from 0 to cells*8. Pure integer arithmetic, so the
@@ -110,12 +149,10 @@ bool render_decorate(void);
    tty and mode halves are unit tested without either one being real. */
 bool render_decorate_for(bool stdout_is_tty, render_mode_t mode);
 
-/* The pieces a rule is drawn from, held as UTF-8 strings rather than chars
-   because a box-drawing glyph is three bytes. There is no vertical here: the
-   screens scroll and print lines of whatever length they like, so the box
-   brackets the content top and bottom instead of enclosing it. */
+/* The pieces a box is drawn from, held as UTF-8 strings rather than chars
+   because a box-drawing glyph is three bytes. */
 typedef struct {
-    const char *tl, *tr, *bl, *br, *h;
+    const char *tl, *tr, *bl, *br, *h, *v;
 } render_box_t;
 
 /* Rounded Unicode when the terminal can decode UTF-8, ASCII when it cannot.
@@ -133,6 +170,15 @@ void render_title_rule(const char *title);
    exactly as it arrives, so screens keep control of their own wording and the
    e2e suite keeps matching plain substrings. */
 void render_help_row(const char *hints);
+
+/* One line of a box's body: left border, styled_text padded or cut to fit,
+   right border. Draws nothing unless render_decorate() agrees, matching
+   render_title_rule. styled_text may carry render_style() escapes; they are
+   skipped when measuring so a colored caret or label name never throws off
+   the padding. A line wider than the box is cut down to its plain text with
+   a trailing ellipsis rather than breaking the rectangle open, which costs
+   color only on a line long enough to need it. */
+void render_box_line(const char *styled_text);
 
 /* Fills cols/rows from ioctl(TIOCGWINSZ) on stdout, falling back to the
    COLUMNS/LINES environment variables, then to 80x24 if nothing usable is
@@ -157,6 +203,36 @@ void render_screen_enter(void);
    atexit by render_screen_enter, so most callers never need it. */
 void render_screen_leave(void);
 
+/* Turns off line buffering, echo and signal generation on stdin, so a caller
+   can read single keypresses. Returns false when stdin has no settings to
+   read, which is also the one case where nothing was changed and there is
+   nothing to undo. Safe to call while already raw.
+
+   The settings in force beforehand are published to the same handler that
+   restores the screen, so a kill arriving between here and render_raw_leave
+   still hands back a terminal with echo and line editing. */
+bool render_raw_enter(void);
+
+/* Puts back whatever was in force before render_raw_enter. Doing this around
+   anything that blocks for a while matters: with signal generation off,
+   Ctrl-C arrives as a byte nobody is reading rather than as a SIGINT. */
+void render_raw_leave(void);
+
+/* Cursor home and erase, for a screen that repaints in place. Returns ""
+   when nothing is watching, so a piped run stays free of it. */
+const char *render_clear(void);
+
+/* Shows or hides the cursor, for the stretches where someone is typing on a
+   screen that otherwise keeps it hidden. Gated like render_clear. */
+const char *render_cursor(bool show);
+
+/* Reverse video, for flashing one frame of a status line after an action
+   sets it. A screen effect rather than a color, so it answers to the same
+   tty gate as render_clear and render_cursor rather than to NO_COLOR: a
+   flash that never happens is not what NO_COLOR asks for. render_reset()
+   already clears it along with every other SGR attribute. */
+const char *render_flash(void);
+
 /* Brackets one repaint so the terminal shows a finished frame instead of
    painting it piece by piece. Both return "" off a terminal. Terminals that
    have never heard of mode 2026 drop the sequence, so there is no capability
@@ -177,5 +253,12 @@ void splash_render_frame(int frame, int total);
    A no-op unless both stdin and stdout are ttys, so piped runs never see it
    or block on it. Restores stdin's termios before returning on every path. */
 void render_splash(void);
+
+/* Which spinner glyph to show at tick index `frame`, wrapping through the
+   frame set so a call that runs for a while just keeps spinning. utf8 picks
+   the braille frames over the four-frame ASCII fallback. Pure, so the wrap
+   and the fallback choice are a unit test with no terminal involved; the
+   only caller is the UI-side tick the menu registers with github_service. */
+const char *render_spinner_frame(int frame, bool utf8);
 
 #endif
