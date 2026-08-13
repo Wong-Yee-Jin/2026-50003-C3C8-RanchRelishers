@@ -78,4 +78,13 @@ const char *github_service_username(void);
    different thing from an account with no repositories at all. */
 gh_svc_result_t github_service_repos(char names[][128], int max, int *count);
 
+/* Registers a callback invoked roughly every ~80ms while a GitHub call is in
+   flight: during login_wait's polling sleeps, and around the blocking HTTP
+   transfers behind resume and repos. Neither this module nor github.c ever
+   draws anything themselves, so an interactive caller registers this to
+   animate a spinner and a piped caller leaves it unset. tick may be NULL to
+   clear a previously registered one; ctx is opaque and handed back
+   unchanged on every call. */
+void github_service_set_tick(void (*tick)(void *ctx), void *ctx);
+
 #endif

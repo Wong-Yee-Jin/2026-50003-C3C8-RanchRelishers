@@ -33,10 +33,30 @@ static struct curl_slist *common_headers(struct curl_slist *h) {
     return curl_slist_append(h, "Accept: application/json");
 }
 
+/* What CURLOPT_XFERINFODATA points at: the tick libcurl should call, paired
+   with the opaque context it was registered with, since CURLOPT_XFERINFODATA
+   only has room for one pointer. */
+typedef struct { gh_tick_fn tick; void *ctx; } tick_relay_t;
+
+/* libcurl's transfer-progress callback. The four counters are how curl would
+   normally report bytes moved so far; nothing here cares about progress
+   itself, only that some time has passed, so they are ignored. Returning
+   nonzero would abort the transfer, which is never what a tick wants. */
+static int xferinfo_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                       curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    const tick_relay_t *relay = clientp;
+    if (relay->tick) relay->tick(relay->ctx);
+    return 0;
+}
+
 /* The shared tail of both the POST and GET helpers: set the options every
    transfer needs and run it. Keeping this in one place stops the timeout and
-   user-agent choices from drifting apart between the two callers. */
-static bool perform(CURL *curl, struct curl_slist *headers, resp_buf *r) {
+   user-agent choices from drifting apart between the two callers. tick may
+   be NULL for a caller with nothing to animate; relay is a local so its
+   address stays valid for exactly as long as curl_easy_perform needs it. */
+static bool perform(CURL *curl, struct curl_slist *headers, resp_buf *r,
+                    gh_tick_fn tick, void *tick_ctx) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "mini-gh-tracker");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
@@ -45,6 +65,13 @@ static bool perform(CURL *curl, struct curl_slist *headers, resp_buf *r) {
        total keeps a dead network from hanging any of the callers below. */
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+    tick_relay_t relay = { tick, tick_ctx };
+    if (tick) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &relay);
+    }
     CURLcode rc = curl_easy_perform(curl);
     return rc == CURLE_OK;
 }
@@ -63,7 +90,10 @@ static bool http_post_form(const char *url, const char *body, char *out, size_t 
     }
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    bool ok = perform(curl, headers, &r);
+    /* Neither device-flow endpoint below runs long enough to need a tick:
+       one is a single prompt-setup call, the other is polled repeatedly by
+       login_wait, which already ticks between polls itself. */
+    bool ok = perform(curl, headers, &r, NULL, NULL);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     if (!ok) return false;
@@ -75,10 +105,11 @@ static bool http_post_form(const char *url, const char *body, char *out, size_t 
    never calls this; it backs the user and repo fetches below. http_status is
    set to the HTTP response code when the transfer completes, or left at 0
    when the transfer itself failed, so a caller can tell "GitHub answered
-   with an error" apart from "we never reached GitHub". */
+   with an error" apart from "we never reached GitHub". tick/tick_ctx may
+   both be NULL for a caller with nothing to animate. */
 static bool
 http_get_bearer(const char *url, const char *token, char *out, size_t outlen,
-                long *http_status) {
+                long *http_status, gh_tick_fn tick, void *tick_ctx) {
     if (http_status) *http_status = 0;
     if (outlen == 0) return false;
     CURL *curl = curl_easy_init();
@@ -114,7 +145,7 @@ http_get_bearer(const char *url, const char *token, char *out, size_t outlen,
     }
     headers = with_auth;
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    bool ok = perform(curl, headers, &r);
+    bool ok = perform(curl, headers, &r, tick, tick_ctx);
     if (ok && http_status)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_status);
     curl_slist_free_all(headers);
@@ -224,10 +255,12 @@ gh_status_t github_device_poll(const char *device_code, char *token_out, size_t 
    handling; the inline notes below cover the rejection check and the null-name
    fallback. Whoever calls this decides what to do with the result, which is why
    nothing here knows the users table exists. */
-bool github_fetch_user(const char *token, gh_profile_t *out, bool *rejected) {
+bool github_fetch_user(const char *token, gh_profile_t *out, bool *rejected,
+                       gh_tick_fn tick, void *tick_ctx) {
     char resp[8192];
     long status = 0;
-    bool ok = http_get_bearer("https://api.github.com/user", token, resp, sizeof(resp), &status);
+    bool ok = http_get_bearer("https://api.github.com/user", token, resp, sizeof(resp),
+                              &status, tick, tick_ctx);
     /* status stays 0 on a transport failure, so this is only true when we
        actually reached GitHub and it answered 401/403: a real rejection of
        the token, not a stalled connection or a DNS failure. */
@@ -264,7 +297,8 @@ int github_parse_repo_names(const char *body, char names[][128], int max) {
 }
 
 /* Fetch the user's repositories and hand back just their names. */
-int github_list_repos(const char *token, char names[][128], int max) {
+int github_list_repos(const char *token, char names[][128], int max,
+                      gh_tick_fn tick, void *tick_ctx) {
     /* A page of full repo objects can run past a few hundred KB, too big for
        a comfortable stack buffer, so this one is heap allocated. per_page is
        kept well under a page's worst case and the cap gives it headroom. */
@@ -272,7 +306,7 @@ int github_list_repos(const char *token, char names[][128], int max) {
     char *resp = malloc(cap);
     if (!resp) return -1;
     bool ok = http_get_bearer("https://api.github.com/user/repos?per_page=30&sort=updated",
-                              token, resp, cap, NULL);
+                              token, resp, cap, NULL, tick, tick_ctx);
     int n = ok ? github_parse_repo_names(resp, names, max) : -1;
     free(resp);
     return n;

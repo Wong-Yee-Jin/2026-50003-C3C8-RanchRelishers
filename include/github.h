@@ -26,6 +26,13 @@ typedef struct {
    a polling caller can react without parsing strings itself. */
 typedef enum { GH_OK, GH_PENDING, GH_SLOW_DOWN, GH_DENIED, GH_EXPIRED, GH_ERROR } gh_status_t;
 
+/* Called periodically during a blocking transfer below, threaded through to
+   libcurl's transfer-progress callback, so a caller with a UI can animate
+   something while curl blocks. This module never calls it more than curl
+   hands back and never draws anything itself; ctx is opaque and passed back
+   unchanged. */
+typedef void (*gh_tick_fn)(void *ctx);
+
 /* Classify a token-endpoint response body without any network. An access_token
    field yields GH_OK and copies the token into token_out; otherwise the error
    field is mapped to the matching status, and anything unrecognized is
@@ -76,8 +83,13 @@ typedef struct {
    given it is set true only when GitHub itself answered 401 or 403, meaning
    the token is actually invalid rather than the request never reaching
    GitHub, so a caller can tell a real rejection apart from a network
-   problem. */
-bool github_fetch_user(const char *token, gh_profile_t *out, bool *rejected);
+   problem.
+
+   tick and tick_ctx may both be NULL for a caller with nothing to animate;
+   otherwise tick is invoked periodically during the transfer via libcurl's
+   progress callback. */
+bool github_fetch_user(const char *token, gh_profile_t *out, bool *rejected,
+                       gh_tick_fn tick, void *tick_ctx);
 
 /* Pull the name field out of each object in a top-level JSON array, such as
    the body of GET /user/repos. Pure and network-free so it is unit tested
@@ -86,7 +98,9 @@ int github_parse_repo_names(const char *body, char names[][128], int max);
 
 /* GET /user/repos with the bearer token and parse the repo names out of the
    response. Returns -1 on an HTTP failure so the caller can tell a failed
-   request apart from an account with zero repos. */
-int github_list_repos(const char *token, char names[][128], int max);
+   request apart from an account with zero repos. tick/tick_ctx behave as in
+   github_fetch_user above. */
+int github_list_repos(const char *token, char names[][128], int max,
+                      gh_tick_fn tick, void *tick_ctx);
 
 #endif

@@ -4,7 +4,7 @@
 #include "github.h"
 #include "token_store.h"
 #include <stdio.h>
-#include <unistd.h>
+#include <time.h>
 
 /* The offline identity. It is an ordinary row in users like any assignee, so
    the id in auth_ctx always resolves to somebody, and the name is fixed so a
@@ -24,6 +24,34 @@ static gh_device_t PENDING;
    around GitHub's own 15 minute expiry at a 5 second interval, with room to
    spare for the slow_down backoff. */
 #define GH_MAX_POLLS 180
+
+/* Set only by github_service_set_tick, read only by poll_wait and the two
+   calls into github.c below. NULL means nobody is watching, which is every
+   piped run and every interactive one until the menu registers a spinner. */
+static void (*GH_TICK)(void *ctx) = NULL;
+static void *GH_TICK_CTX = NULL;
+
+void github_service_set_tick(void (*tick)(void *ctx), void *ctx) {
+    GH_TICK = tick;
+    GH_TICK_CTX = ctx;
+}
+
+/* Sleeps for interval_secs in ~80ms slices, ticking the registered callback
+   between them. Most of login_wait's runtime is spent right here, waiting
+   out the interval GitHub asked for between polls, so this is where a UI
+   spinner needs to keep animating rather than freezing for however many
+   seconds interval_secs is. With no tick registered this is exactly
+   interval_secs slept in smaller pieces, which costs nothing observable. */
+static void poll_wait(int interval_secs) {
+    long remaining_ms = (long)interval_secs * 1000;
+    while (remaining_ms > 0) {
+        long slice = remaining_ms < 80 ? remaining_ms : 80;
+        struct timespec ts = { .tv_sec = slice / 1000, .tv_nsec = (slice % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+        remaining_ms -= slice;
+        if (GH_TICK) GH_TICK(GH_TICK_CTX);
+    }
+}
 
 /* Point the session at the local user, creating the row the first time. The
    lookup passes over a GitHub account that happens to be named "local", so an
@@ -55,7 +83,7 @@ static void use_local_identity(void) {
    the fetch, so the caller can tell a refused token from an unreachable one. */
 static bool adopt_github_user(const char *token, bool *rejected) {
     gh_profile_t profile;
-    if (!github_fetch_user(token, &profile, rejected)) return false;
+    if (!github_fetch_user(token, &profile, rejected, GH_TICK, GH_TICK_CTX)) return false;
 
     user_t user;
     if (!db_user_upsert_github(profile.id, profile.login, profile.display_name,
@@ -98,13 +126,13 @@ gh_svc_result_t github_service_login_wait(bool *token_saved) {
 
     int interval = PENDING.interval;
     // a malformed device response could hand back an interval that busy-polls
-    // or, cast to unsigned for sleep(), sleeps for close to forever
+    // or, passed straight to poll_wait, waits for close to forever
     if (interval < 1 || interval > 60) interval = 5;
 
     char token[256];
     int consecutive_errors = 0;
     for (int poll = 0; poll < GH_MAX_POLLS; poll++) {
-        sleep((unsigned int)interval);
+        poll_wait(interval);
         gh_status_t status = github_device_poll(PENDING.device_code, token, sizeof(token));
 
         if (status == GH_OK) {
@@ -145,7 +173,7 @@ gh_svc_result_t github_service_repos(char names[][128], int max, int *count) {
     char token[256];
     if (!token_load(token, sizeof(token))) return GH_SVC_LOCAL;
 
-    int n = github_list_repos(token, names, max);
+    int n = github_list_repos(token, names, max, GH_TICK, GH_TICK_CTX);
     if (n < 0) return GH_SVC_UNREACHABLE;
     *count = n;
     return GH_SVC_OK;
