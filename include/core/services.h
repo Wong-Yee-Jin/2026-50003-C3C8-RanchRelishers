@@ -53,10 +53,4 @@ svc_result_t user_service_create(const char *username, user_t *out);
 int          user_service_list(user_t **out);
 svc_result_t user_service_get(const char *id, user_t *out);
 
-/* ---- Comments ----
-   Adding a comment is a write that also confirms the parent issue exists;
-   listing them is a read. */
-svc_result_t comment_service_add(const char *issue_id, const char *text, issue_t *parent_check);
-int          comment_service_list(const char *issue_id, comment_t **out);
-
 #endif

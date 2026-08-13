@@ -45,11 +45,7 @@ static const char *SCHEMA =
     "CREATE TABLE IF NOT EXISTS issue_assignees("
     "  issue_id TEXT NOT NULL REFERENCES issues(id),"
     "  user_id TEXT NOT NULL REFERENCES users(id),"
-    "  PRIMARY KEY(issue_id, user_id));"
-    "CREATE TABLE IF NOT EXISTS comments("
-    "  id TEXT PRIMARY KEY NOT NULL,"
-    "  issue_id TEXT NOT NULL REFERENCES issues(id),"
-    "  text TEXT NOT NULL, created_at INTEGER NOT NULL);";
+    "  PRIMARY KEY(issue_id, user_id));";
 
 /* Open the database (a file, or ":memory:" for tests) and lay down the schema.
    Returns false if either step fails so main can stop before serving a half
@@ -255,7 +251,34 @@ int db_label_list(label_t **out_list) {
     return n;
 }
 
-/* Install the default bug/feature/question labels, but only on a fresh store. */
+/* Fixed label catalog: every label a project can use, seeded once with a
+   real description apiece so the Labels screen is useful without anyone
+   ever having to type one in. Mirrors the catalog the web app seeds from
+   (kept in sync by hand since the two apps don't share a database). */
+static const struct { const char *name; const char *description; } LABEL_CATALOG[] = {
+    { "bug",                     "Something isn't working" },
+    { "enhancement",             "New feature or request" },
+    { "documentation",           "Documentation improvements" },
+    { "duplicate",                "Duplicate issue" },
+    { "wontfix",                  "Will not be worked on" },
+    { "priority/low",             "Low priority" },
+    { "priority/medium",          "Medium priority" },
+    { "priority/high",            "High priority" },
+    { "priority/critical",        "Critical priority" },
+    { "status/needs-triage",      "Needs triage" },
+    { "status/in-progress",       "In progress" },
+    { "status/blocked",           "Blocked" },
+    { "status/ready-for-review",  "Ready for review" },
+    { "component/api",            "API component" },
+    { "component/ui",             "UI component" },
+    { "component/database",       "Database component" },
+    { "component/auth",           "Auth component" },
+};
+#define LABEL_CATALOG_COUNT (int)(sizeof(LABEL_CATALOG) / sizeof(LABEL_CATALOG[0]))
+
+/* Install the fixed label catalog, but only on a fresh store: labels have no
+   "create" screen of their own anymore, so this seed is the only way the
+   table is ever populated. */
 void db_labels_seed(void) {
     /* Only seed an empty table so calling this on every startup stays a no-op
        once the defaults exist. A -1 means the read itself failed, and writing
@@ -266,9 +289,9 @@ void db_labels_seed(void) {
     free(existing);
     if (n != 0) return;
     label_t tmp;
-    db_label_create("bug", "", &tmp);
-    db_label_create("feature", "", &tmp);
-    db_label_create("question", "", &tmp);
+    for (int i = 0; i < LABEL_CATALOG_COUNT; i++) {
+        db_label_create(LABEL_CATALOG[i].name, LABEL_CATALOG[i].description, &tmp);
+    }
 }
 
 /* ---- Users / Assignees ---- */
@@ -711,57 +734,4 @@ bool db_issue_assign_user(const char *issue_id, const char *user_id) {
     bool ok = sqlite3_step(st) == SQLITE_DONE;
     sqlite3_finalize(st);
     return ok;
-}
-
-/* ---- Comments ---- */
-
-/* Add a comment to an issue, stamping created_at with the current unix time so
-   the listing can order by when it was written. */
-bool db_comment_add(const char *issue_id, const char *text) {
-    char id[ID_LEN];
-    if (!id_generate(id)) return false;
-    sqlite3_stmt *st;
-    const char *sql = "INSERT INTO comments(id, issue_id, text, created_at) VALUES(?, ?, ?, ?)";
-    if (sqlite3_prepare_v2(DB, sql, -1, &st, NULL) != SQLITE_OK) return false;
-    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, issue_id, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 3, text, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 4, (long long)time(NULL));
-    bool ok = sqlite3_step(st) == SQLITE_DONE;
-    sqlite3_finalize(st);
-    return ok;
-}
-
-/* All comments on an issue, oldest first. Count on success, -1 if the query or
-   an allocation failed. */
-int db_comment_list_by_issue(const char *issue_id, comment_t **out_list) {
-    *out_list = NULL;
-    sqlite3_stmt *st;
-    /* rowid breaks ties within a single created_at second so two comments added
-       back to back keep the order they were written, which the seconds-only
-       timestamp cannot guarantee on its own. */
-    if (sqlite3_prepare_v2(DB,
-            "SELECT id, text FROM comments WHERE issue_id=? ORDER BY created_at, rowid",
-            -1, &st, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(st, 1, issue_id, -1, SQLITE_STATIC);
-    int cap = 0, n = 0, rc;
-    comment_t *arr = NULL;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        /* Doubling growth; realloc into tmp so a failure frees arr and finalizes
-           st before returning. */
-        if (n == cap) {
-            int ncap = cap ? cap * 2 : 8;
-            comment_t *tmp = realloc(arr, ncap * sizeof(*arr));
-            if (!tmp) { free(arr); sqlite3_finalize(st); return -1; }
-            arr = tmp; cap = ncap;
-        }
-        memset(&arr[n], 0, sizeof(arr[n]));
-        snprintf(arr[n].id, sizeof(arr[n].id), "%s", sqlite3_column_text(st, 0));
-        snprintf(arr[n].text, sizeof(arr[n].text), "%s", sqlite3_column_text(st, 1));
-        n++;
-    }
-    sqlite3_finalize(st);
-    if (rc != SQLITE_DONE) { free(arr); return -1; }
-    *out_list = arr;
-    return n;
 }

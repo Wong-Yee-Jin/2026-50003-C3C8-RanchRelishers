@@ -296,7 +296,10 @@ int github_parse_repo_names(const char *body, char names[][128], int max) {
     return json_array_objects(body, "name", names, max);
 }
 
-/* Fetch the user's repositories and hand back just their names. */
+/* Fetch the user's repositories -- public and private alike -- and hand
+   back just their names. visibility=all is spelled out explicitly rather
+   than left to GitHub's default so this keeps returning both kinds even if
+   that default ever changes. */
 int github_list_repos(const char *token, char names[][128], int max,
                       gh_tick_fn tick, void *tick_ctx) {
     /* A page of full repo objects can run past a few hundred KB, too big for
@@ -305,9 +308,59 @@ int github_list_repos(const char *token, char names[][128], int max,
     size_t cap = 1048576;
     char *resp = malloc(cap);
     if (!resp) return -1;
-    bool ok = http_get_bearer("https://api.github.com/user/repos?per_page=30&sort=updated",
-                              token, resp, cap, NULL, tick, tick_ctx);
+    bool ok = http_get_bearer(
+        "https://api.github.com/user/repos?per_page=30&sort=updated&visibility=all",
+        token, resp, cap, NULL, tick, tick_ctx);
     int n = ok ? github_parse_repo_names(resp, names, max) : -1;
+    free(resp);
+    return n;
+}
+
+/* GET with no auth at all, for public endpoints like GitHub's user search
+   that don't need or want a token. Kept separate from http_get_bearer so a
+   caller here can never accidentally leak the signed-in user's token into
+   an unauthenticated request. */
+static bool http_get_public(const char *url, char *out, size_t outlen) {
+    if (outlen == 0) return false;
+    CURL *curl = curl_easy_init();
+    if (!curl) return false;
+    resp_buf r = { out, 0, outlen - 1 };
+    struct curl_slist *headers = common_headers(NULL);
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    /* No tick: the username search is one small request off a keypress, over
+       before a spinner would draw its second frame. */
+    bool ok = perform(curl, headers, &r, NULL, NULL);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    if (!ok) return false;
+    out[r.len] = '\0';
+    return true;
+}
+
+/* GET /search/users?q=... and copy up to max matching logins into out. See
+   github.h for the full contract. */
+int github_search_usernames(const char *query, char logins[][128], int max) {
+    if (!query || !query[0] || max <= 0) return 0;
+
+    CURL *esc = curl_easy_init();
+    if (!esc) return -1;
+    char *enc_q = curl_easy_escape(esc, query, 0);
+    if (!enc_q) { curl_easy_cleanup(esc); return -1; }
+
+    char url[512];
+    snprintf(url, sizeof(url), "https://api.github.com/search/users?q=%s&per_page=%d", enc_q, max);
+    curl_free(enc_q);
+    curl_easy_cleanup(esc);
+
+    /* A page of search results (login, id, avatar_url, html_url, etc. per
+       hit) comfortably fits a stack-sized-but-heap-allocated buffer even at
+       a generous per_page. */
+    size_t cap = 65536;
+    char *resp = malloc(cap);
+    if (!resp) return -1;
+
+    bool ok = http_get_public(url, resp, cap);
+    int n = ok ? json_array_field_objects(resp, "items", "login", logins, max) : -1;
     free(resp);
     return n;
 }

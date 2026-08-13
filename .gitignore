@@ -4,6 +4,9 @@ build/
 *.o
 *.d
 
+# Local secrets: GH_CLIENT_ID and friends, loaded by dotenv_load at startup
+.env
+
 # Local database files
 issues.db
 *.db

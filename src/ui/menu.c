@@ -2,6 +2,10 @@
 #include "ui/input.h"
 #include "core/github_service.h"
 #include "core/services.h"
+/* Straight to github.c for the username search only: it needs no token and
+   no session, so it never goes near github_service the way login and the
+   repo sync do. */
+#include "github.h"
 #include "render.h"
 #include "assets.h"
 #include <ctype.h>
@@ -546,13 +550,12 @@ static void project_progress_append(char *line, size_t n, const char *project_id
     free(issues);
 }
 
-/* Renders one issue in full: header line, description, then labels,
-   assignees and comments resolved from the ids stored on the issue into
-   names a person reads on screen. Each printed line goes through ui_line on
-   its own, which is what lets draw_issue_detail's box hold arbitrarily long
-   description and comment text without breaking: ui_line's own overflow
-   handling cuts a line that's too wide rather than this function guessing at
-   one. */
+/* Renders one issue in full: header line, description, then labels and
+   assignees resolved from the ids stored on the issue into names a person
+   reads on screen. Each printed line goes through ui_line on its own, which
+   is what lets draw_issue_detail's box hold an arbitrarily long description
+   without breaking: ui_line's own overflow handling cuts a line that's too
+   wide rather than this function guessing at one. */
 static void print_issue(const issue_t *is) {
     char line[DESC_LEN + 64];
     ui_line("");
@@ -600,67 +603,13 @@ static void print_issue(const issue_t *is) {
     }
     ui_line(asg_line);
     free(users);
-
-    comment_t *comments = NULL;
-    int cn = comment_service_list(is->id, &comments);
-    if (cn < 0) {
-        ui_line("could not read from the database");
-    } else {
-        snprintf(line, sizeof(line), "comments (%d):", cn);
-        ui_line(line);
-        for (int i = 0; i < cn; i++) {
-            snprintf(line, sizeof(line), "  - %s", comments[i].text);
-            ui_line(line);
-        }
-    }
-    free(comments);
-}
-
-/* What came back from the numbered label picker. UNAVAILABLE means the list
-   itself could not be read or the input ran out, so nothing was asked and
-   nothing was chosen. */
-typedef enum { PICK_CHOSEN, PICK_BLANK, PICK_UNKNOWN, PICK_UNAVAILABLE } pick_t;
-
-/* Lists the labels and asks for one by number, writing the chosen label's id
-   into out. Two screens need this: adding a label to an issue, and filtering
-   a project's issues by one. Filtering used to ask for the 24-character id
-   instead, which is not shown anywhere in the UI, so typing the name everyone
-   can see never matched anything. */
-static pick_t pick_label(const char *prompt, char *out, size_t n) {
-    label_t *labels = NULL;
-    int ln = label_service_list(&labels);
-    if (ln < 0) {
-        printf("could not read from the database\n");
-        free(labels);
-        return PICK_UNAVAILABLE;
-    }
-
-    printf("labels:\n");
-    for (int i = 0; i < ln; i++)
-        printf("  %d) %s%s%s\n", i + 1,
-               render_style(render_slot_for_label(labels[i].name)),
-               labels[i].name, render_reset());
-
-    char line[NAME_LEN];
-    pick_t picked = PICK_UNAVAILABLE;
-    if (prompt_line(prompt, line, sizeof(line))) {
-        int idx = ui_parse_choice(line);
-        if (line[0] == '\0') {
-            picked = PICK_BLANK;
-        } else if (idx >= 1 && idx <= ln) {
-            snprintf(out, n, "%s", labels[idx - 1].id);
-            picked = PICK_CHOSEN;
-        } else {
-            picked = PICK_UNKNOWN;
-        }
-    }
-    free(labels);
-    return picked;
 }
 
 /* The letters behind the issue detail action rows, in the order they are
-   drawn, so a caret landing on row 2 fires the same code as typing 'l'. */
-static const char DETAIL_ACTIONS[] = "tlam";
+   drawn, so a caret landing on a row fires the same code as typing its
+   letter. Labels and assignees are set once when the issue is created, so
+   toggling open/closed is all that is left to do from here. */
+static const char DETAIL_ACTIONS[] = "t";
 
 static void draw_issue_detail(const void *ctx, int selected) {
     const issue_t *is = ctx;
@@ -669,7 +618,7 @@ static void draw_issue_detail(const void *ctx, int selected) {
     if (selected < 0) return;   /* a typed screen lists its keys in the help row instead */
 
     static const char *const ROWS[] = {
-        "t) toggle status", "l) add label", "a) assign user", "m) add comment"
+        "t) toggle status"
     };
     for (int i = 0; i < (int)(sizeof(ROWS) / sizeof(ROWS[0])); i++) {
         char line[64];
@@ -680,7 +629,10 @@ static void draw_issue_detail(const void *ctx, int selected) {
 
 /* Action screen for a single issue. Re-fetches the issue at the top of every
    loop pass instead of holding onto the struct across an edit, so a status
-   toggle or a new comment shows up on the very next redraw. */
+   toggle shows up on the very next redraw. Labels and assignees are set
+   once at issue-creation time (see prompt_labels_and_assignees) and shown
+   here read-only; the only action left on this screen is toggling
+   open/closed -- there is no comments feature anymore. */
 static void screen_issue_detail(const char *issue_id) {
     int sel = 0;
     for (;;) {
@@ -697,8 +649,7 @@ static void screen_issue_detail(const char *issue_id) {
            unknown choice here, and it stays one. */
         int rows = ui_interactive() ? (int)(sizeof(DETAIL_ACTIONS) - 1) : 0;
         ui_choice_t choice = ui_select(title, draw_issue_detail, &is, rows, &sel, DETAIL_ACTIONS,
-                                       "t) toggle status   l) add label   a) assign user   "
-                                       "m) add comment   0) back",
+                                       "t) toggle status   0) back",
                                        ui_keys("enter run   esc back"));
         if (choice.kind == UI_EOF || choice.kind == UI_BACK) return;
 
@@ -711,48 +662,8 @@ static void screen_issue_detail(const char *issue_id) {
             report(issue_service_set_status(issue_id, next), "invalid request",
                    next == STATUS_CLOSED ? "issue closed" : "issue reopened");
 
-        } else if (action == 'l') {
-            char label_id[ID_LEN];
-            pick_t picked = pick_label("label #: ", label_id, sizeof(label_id));
-            if (picked == PICK_CHOSEN)
-                report(issue_service_add_label(issue_id, label_id), "invalid request", "label added");
-            else if (picked != PICK_UNAVAILABLE)
-                note(RENDER_DANGER, "unknown choice");
-
-        } else if (action == 'a') {
-            user_t *users = NULL;
-            int un = user_service_list(&users);
-            if (un < 0) {
-                printf("could not read from the database\n");
-            } else {
-                printf("users:\n");
-                for (int i = 0; i < un; i++) printf("  %d) %s\n", i + 1, users[i].username);
-                char line[NAME_LEN];
-                if (prompt_line("user #: ", line, sizeof(line))) {
-                    int idx = ui_parse_choice(line);
-                    if (idx >= 1 && idx <= un) {
-                        report(issue_service_add_assignee(issue_id, users[idx - 1].id),
-                               "invalid request", "assignee added");
-                    } else {
-                        note(RENDER_DANGER, "unknown choice");
-                    }
-                }
-            }
-            free(users);
-
-        } else if (action == 'm') {
-            char text[COMMENT_LEN];
-            /* Input running out here goes around the loop rather than
-               returning, so the screen behaves the way the other two prompts
-               on it always have. */
-            if (prompt_line("comment: ", text, sizeof(text)) && !cancelled(text)) {
-                issue_t parent_check;   // comment_service_add dereferences this unconditionally
-                report(comment_service_add(issue_id, text, &parent_check),
-                       "comment cannot be blank", "comment added");
-            }
-
         } else if (choice.kind == UI_UNKNOWN) {
-            printf("unknown choice\n");
+            note(RENDER_DANGER, "unknown choice");
         }
     }
 }
@@ -792,6 +703,75 @@ static void print_matches(const issue_t *results, int n) {
                results[i].status == STATUS_OPEN ? "open" : "closed", results[i].title);
 }
 
+/* Parses a "1 3 5" / "1,3,5" style multi-select line into 1-based indices,
+   writing up to max of them into out and returning how many were found.
+   Anything that doesn't parse as a positive number is silently skipped
+   rather than aborting the whole line, so one typo doesn't throw away the
+   rest of a person's picks. */
+static int parse_index_list(const char *line, int *out, int max) {
+    int n = 0;
+    const char *p = line;
+    while (*p && n < max) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        char *end;
+        long v = strtol(p, &end, 10);
+        if (end != p && v > 0) out[n++] = (int)v;
+        p = end;
+    }
+    return n;
+}
+
+/* Offers to attach label(s) and assignee(s) to a just-created issue, right in
+   the creation flow: there is no separate "add label" / "assign user" screen,
+   so this is the only place either ever gets set. Blank input skips a section
+   entirely; unknown indices are just skipped. Both lists print below the
+   frame, like every other prompt sequence here, and the caller pauses once
+   afterwards before the screen repaints over them. */
+static void prompt_labels_and_assignees(const char *issue_id) {
+    label_t *labels = NULL;
+    int ln = label_service_list(&labels);
+    if (ln > 0) {
+        printf("\nlabels:\n");
+        for (int i = 0; i < ln; i++) {
+            printf("  %d) %s%s%s", i + 1,
+                   render_style(render_slot_for_label(labels[i].name)),
+                   labels[i].name, render_reset());
+            if (labels[i].description[0]) printf(" - %s", labels[i].description);
+            printf("\n");
+        }
+        char line[256];
+        if (prompt_line("add label #s (space/comma separated, blank for none): ",
+                        line, sizeof(line)) && line[0]) {
+            int idxs[MAX_LABELS];
+            int n = parse_index_list(line, idxs, MAX_LABELS);
+            for (int i = 0; i < n; i++) {
+                if (idxs[i] >= 1 && idxs[i] <= ln)
+                    issue_service_add_label(issue_id, labels[idxs[i] - 1].id);
+            }
+        }
+    }
+    free(labels);
+
+    user_t *users = NULL;
+    int un = user_service_list(&users);
+    if (un > 0) {
+        printf("\nassignees:\n");
+        for (int i = 0; i < un; i++) printf("  %d) %s\n", i + 1, users[i].username);
+        char line[256];
+        if (prompt_line("assign user #s (space/comma separated, blank for none): ",
+                        line, sizeof(line)) && line[0]) {
+            int idxs[MAX_ASSIGNEES];
+            int n = parse_index_list(line, idxs, MAX_ASSIGNEES);
+            for (int i = 0; i < n; i++) {
+                if (idxs[i] >= 1 && idxs[i] <= un)
+                    issue_service_add_assignee(issue_id, users[idxs[i] - 1].id);
+            }
+        }
+    }
+    free(users);
+}
+
 /* Issue list for one project, with create/search/filter and drill-down into
    a single issue. issue_service_list hands back a heap array each pass, so
    every branch below frees it before it returns or goes around again, the
@@ -806,9 +786,9 @@ static void screen_issues(const char *project_id, const char *project_name) {
         char title[TITLE_LEN + 16];
         snprintf(title, sizeof(title), "Issues: %s", project_name);
 
-        ui_choice_t choice = ui_select(title, draw_issues, &view, n > 0 ? n : 0, &sel, "csf",
-                                       "  c) create   s) search   f) filter   0) back",
-                                       ui_keys("enter open   c create   s search   f filter   esc back"));
+        ui_choice_t choice = ui_select(title, draw_issues, &view, n > 0 ? n : 0, &sel, "cs",
+                                       "  c) create   s) search   0) back",
+                                       ui_keys("enter open   c create   s search   esc back"));
         if (choice.kind == UI_EOF || choice.kind == UI_BACK) { free(issues); return; }
 
         if (choice.kind == UI_INDEX) {
@@ -821,7 +801,7 @@ static void screen_issues(const char *project_id, const char *project_name) {
         if (choice.kind == UI_UNKNOWN) {
             // a bad selection still has to release the list fetched above
             // before the loop goes around and fetches it again
-            printf("unknown choice\n");
+            note(RENDER_DANGER, "unknown choice");
             free(issues);
             continue;
         }
@@ -835,8 +815,16 @@ static void screen_issues(const char *project_id, const char *project_name) {
                answer rather than a way out of the prompt. */
             if (!prompt_line("description: ", desc, sizeof(desc))) return;
             issue_t created;
-            report(issue_service_create(project_id, new_title, desc, &created),
-                   "title cannot be blank", "issue created");
+            svc_result_t r = issue_service_create(project_id, new_title, desc, &created);
+            /* Labels and assignees are only ever set here, so the picker runs
+               before the result line lands: report() writes the status row the
+               next repaint shows, and the prompts below would otherwise print
+               over it. */
+            if (r == SVC_OK) {
+                prompt_labels_and_assignees(created.id);
+                ui_pause();
+            }
+            report(r, "title cannot be blank", "issue created");
 
         } else if (choice.letter == 's') {
             char kw[TITLE_LEN];
@@ -849,23 +837,6 @@ static void screen_issues(const char *project_id, const char *project_name) {
             free(results);
             ui_pause();
 
-        } else if (choice.letter == 'f') {
-            char status_in[STATUS_LEN], label_id[ID_LEN];
-            if (!prompt_line("status (open/closed, blank for any): ", status_in, sizeof(status_in)))
-                return;
-            pick_t picked = pick_label("label # (blank for any): ", label_id, sizeof(label_id));
-            if (picked == PICK_UNAVAILABLE) continue;
-            if (picked == PICK_UNKNOWN) { note(RENDER_DANGER, "unknown choice"); continue; }
-            /* the filter treats "" as an active filter, so a skipped field
-               must cross the service boundary as NULL, not an empty string */
-            const char *status_arg = status_in[0] ? status_in : NULL;
-            const char *label_arg = picked == PICK_CHOSEN ? label_id : NULL;
-            issue_t *results = NULL;
-            int rn = issue_service_filter(project_id, status_arg, label_arg, &results);
-            printf("-- filtered issues --\n");
-            print_matches(results, rn);
-            free(results);
-            ui_pause();
         }
     }
 }
@@ -889,11 +860,35 @@ static void draw_projects(const void *ctx, int selected) {
     }
 }
 
+/* Pulls the signed-in GitHub user's repos -- public and private alike, since
+   github_list_repos asks GitHub for everything the token can see -- and adds
+   any repo name not already tracked as a project. Called once on every visit
+   to the Projects screen, so the list stays current with GitHub without a
+   separate "My repos" screen.
+
+   Routed through github_service rather than github.c directly: the service
+   owns the token lookup and the spinner tick, so a slow fetch animates like
+   every other blocking call here instead of freezing the screen. Without a
+   saved token it answers GH_SVC_LOCAL and nothing happens. A name that is
+   already a project comes back SVC_INVALID from project_service_create and
+   is silently skipped. */
+static void sync_projects_from_github(void) {
+    char names[100][128];
+    int n = 0;
+    if (github_service_repos(names, 100, &n) != GH_SVC_OK) return;
+
+    for (int i = 0; i < n; i++) {
+        project_t created;
+        project_service_create(names[i], &created);
+    }
+}
+
 /* Top-level project list and create screen. Same discipline as the issues
    screen: the project array is freed on every branch, including a stray
    keypress that matches nothing, since it's about to be re-listed anyway. */
 static void screen_projects(void) {
     int sel = 0;
+    sync_projects_from_github();
     for (;;) {
         project_t *projects = NULL;
         int n = project_service_list(&projects);
@@ -938,7 +933,7 @@ typedef struct {
 static void draw_labels(const void *ctx, int selected) {
     const label_view_t *v = ctx;
     if (v->n < 0) { ui_line("could not read from the database"); return; }
-    if (v->n == 0) { ui_empty("(no labels yet)", "press c to create the first one"); return; }
+    if (v->n == 0) { ui_empty("(no labels yet)", "the catalog is seeded at startup"); return; }
     for (int i = 0; i < v->n; i++) {
         /* Name and description are colored/plain rather than truncated
            individually; a row long enough to overflow falls back to
@@ -955,9 +950,11 @@ static void draw_labels(const void *ctx, int selected) {
     }
 }
 
-/* Label list and create screen. The rows can be walked with the arrow keys
-   but there is nothing behind them: labels have no screen of their own, so
-   Enter here has nothing to open. */
+/* The label catalog, read only. The full set is seeded once at startup by
+   db_labels_seed and every project picks from that same shared list, so
+   there is nothing to create here. The rows can still be walked with the
+   arrow keys, but there is nothing behind them: labels have no screen of
+   their own, so Enter has nothing to open. */
 static void screen_labels(void) {
     int sel = 0;
     for (;;) {
@@ -968,23 +965,12 @@ static void screen_labels(void) {
         /* Numbers have never selected anything on this screen from a pipe,
            and they still read as an unknown choice there. */
         int rows = ui_interactive() && n > 0 ? n : 0;
-        ui_choice_t choice = ui_select("Labels", draw_labels, &view, rows, &sel, "c",
-                                       "  c) create   0) back",
-                                       ui_keys("c create   esc back"));
+        ui_choice_t choice = ui_select("Labels", draw_labels, &view, rows, &sel, "",
+                                       "  0) back",
+                                       ui_keys("esc back"));
         free(labels);
         if (choice.kind == UI_EOF || choice.kind == UI_BACK) return;
-
-        if (choice.kind == UI_LETTER) {
-            char name[NAME_LEN], desc[LABEL_DESC_LEN];
-            if (!prompt_line("label name: ", name, sizeof(name))) return;
-            if (cancelled(name)) continue;
-            if (!prompt_line("description: ", desc, sizeof(desc))) return;
-            label_t created;
-            report(label_service_create(name, desc, &created),
-                   "blank or duplicate label name", "label created");
-        } else if (choice.kind == UI_UNKNOWN) {
-            printf("unknown choice\n");
-        }
+        if (choice.kind == UI_UNKNOWN) note(RENDER_DANGER, "unknown choice");
     }
 }
 
@@ -1010,9 +996,15 @@ static void draw_users(const void *ctx, int selected) {
     }
 }
 
+#define GH_SUGGEST_MAX 5
+
 /* Same shape as screen_labels: list what's there, then let a signed-in user
-   add to it. Local creation is the only way into the assignee list without
-   a network, since GitHub login has nothing to authenticate against offline. */
+   add to it. Typing a name and pressing enter doesn't add it outright --
+   it searches GitHub for real accounts matching what was typed and shows
+   up to GH_SUGGEST_MAX suggestions to pick from, the same "type, see real
+   matches, pick one" idea as the web app's live autocomplete, just resolved
+   in one round trip instead of on every keystroke since there's no
+   keystroke-level event loop in a blocking terminal read. */
 static void screen_assignees(void) {
     int sel = 0;
     for (;;) {
@@ -1028,13 +1020,37 @@ static void screen_assignees(void) {
         if (choice.kind == UI_EOF || choice.kind == UI_BACK) return;
 
         if (choice.kind == UI_LETTER) {
-            char username[USERNAME_LEN];
-            if (!prompt_line("username: ", username, sizeof(username))) return;
-            if (cancelled(username)) continue;
+            char query[USERNAME_LEN];
+            if (!prompt_line("search github username: ", query, sizeof(query))) return;
+            if (cancelled(query)) continue;
+
+            /* The matches and the pick prompt both land below the frame, so
+               the caller pauses once before the screen repaints over them. */
+            char matches[GH_SUGGEST_MAX][128];
+            int mn = github_search_usernames(query, matches, GH_SUGGEST_MAX);
+            if (mn < 0) {
+                note(RENDER_DANGER, "could not reach GitHub to search usernames");
+                continue;
+            }
+            if (mn == 0) {
+                char text[USERNAME_LEN + 40];
+                snprintf(text, sizeof(text), "no GitHub accounts matched \"%s\"", query);
+                note(RENDER_DANGER, text);
+                continue;
+            }
+
+            printf("matches:\n");
+            for (int i = 0; i < mn; i++) printf("  %d) %s\n", i + 1, matches[i]);
+            char line[NAME_LEN];
+            if (!prompt_line("pick #: ", line, sizeof(line))) return;
+            int idx = ui_parse_choice(line);
+            if (idx < 1 || idx > mn) { note(RENDER_DANGER, "unknown choice"); continue; }
+
             user_t created;
-            report(user_service_create(username, &created), "name taken or empty", "user created");
+            report(user_service_create(matches[idx - 1], &created), "name taken or empty",
+                   "user created");
         } else if (choice.kind == UI_UNKNOWN) {
-            printf("unknown choice\n");
+            note(RENDER_DANGER, "unknown choice");
         }
     }
 }
@@ -1131,69 +1147,67 @@ static void github_logout(void) {
     note(RENDER_OK, "Logged out of GitHub");
 }
 
-/* Lists the signed-in user's repos straight from the GitHub API. Needs a
-   saved token, so a local-only session is told to log in first rather than
-   sent to GitHub with nothing to authenticate the request. */
-static void github_repos(void) {
-    char names[100][128];
-    int n = 0;
-    spinner_begin("fetching repositories");
-    gh_svc_result_t result = github_service_repos(names, 100, &n);
-    spinner_end();
-    switch (result) {
-        case GH_SVC_LOCAL:       note(RENDER_WARN, "Sign in with GitHub first (menu item 4)"); return;
-        case GH_SVC_UNREACHABLE: note(RENDER_DANGER, "could not fetch repositories"); return;
-        case GH_SVC_OK:
-            if (n == 0) printf("no repositories\n");
-            for (int i = 0; i < n; i++) printf("  - %s\n", names[i]);
-            break;
-        default: return;   // the login codes never come back from a listing
-    }
-    ui_pause();
-}
-
+/* The main menu's rows, which depend on whether there is a GitHub identity.
+   Signed out there is exactly one thing worth offering, since every screen
+   below now leans on GitHub: Projects syncs from repos, Assignees resolves
+   real accounts. Signed in, the full list. There is no "My repos" row any
+   more; repos arrive on their own (see sync_projects_from_github). */
 static void draw_main(const void *ctx, int selected) {
     const char *gh_user = ctx;
     char line[USERNAME_LEN + 48];
+    if (!gh_user[0]) {
+        snprintf(line, sizeof(line), "%s1) GitHub login%s", ui_row(0, selected, ""), render_reset());
+        ui_line(line);
+        return;
+    }
     snprintf(line, sizeof(line), "%s1) Projects%s", ui_row(0, selected, ""), render_reset());
     ui_line(line);
     snprintf(line, sizeof(line), "%s2) Labels%s", ui_row(1, selected, ""), render_reset());
     ui_line(line);
     snprintf(line, sizeof(line), "%s3) Assignees%s", ui_row(2, selected, ""), render_reset());
     ui_line(line);
-    /* An empty username is the local session, which has nothing to log out
-       of, so item 4 offers the login instead. */
-    if (gh_user[0])
-        snprintf(line, sizeof(line), "%s4) Log out (%s)%s", ui_row(3, selected, ""), gh_user, render_reset());
-    else
-        snprintf(line, sizeof(line), "%s4) GitHub login%s", ui_row(3, selected, ""), render_reset());
-    ui_line(line);
-    snprintf(line, sizeof(line), "%s5) My repos%s", ui_row(4, selected, ""), render_reset());
+    snprintf(line, sizeof(line), "%s4) Log out (%s)%s", ui_row(3, selected, ""), gh_user, render_reset());
     ui_line(line);
 }
 
 /* Boots the session: play the splash, resume whatever GitHub identity (if
    any) was saved from last time, then loop the main menu until the user
-   quits or stdin runs out. */
+   quits or stdin runs out.
+
+   "Signed in" here means an actual GitHub identity, not the local fallback
+   auth_ctx keeps so the service layer always has somebody to attribute a
+   write to. Someone who has never signed in sees only the login and the
+   quit, since GitHub is the source of truth for both repos and usernames.
+   The caret count follows the row count, so the two states are one screen
+   with a different number of rows rather than two code paths. */
 void menu_run(void) {
     render_splash();
     github_resume_session();
     int sel = 0;
     for (;;) {
         const char *gh_user = github_service_username();
-        ui_choice_t choice = ui_select("Main Menu", draw_main, gh_user, 5, &sel, "",
+        bool signed_in = gh_user[0] != '\0';
+        int rows = signed_in ? 4 : 1;
+        /* sel belongs to the caller across screens, so a logout shrinking the
+           menu under it would otherwise leave the caret past the last row. */
+        if (sel >= rows) sel = rows - 1;
+
+        ui_choice_t choice = ui_select("Main Menu", draw_main, gh_user, rows, &sel, "",
                                        "0) Quit", ui_keys("enter open   esc quit"));
-        if (choice.kind == UI_UNKNOWN) { printf("unknown choice\n"); continue; }
+        if (choice.kind == UI_UNKNOWN) { note(RENDER_DANGER, "unknown choice"); continue; }
         /* Back, quit and a closed stdin all mean the same thing at the top
            level: there is no level above this one to go back to. */
         if (choice.kind != UI_INDEX) return;
 
+        if (!signed_in) {
+            if (choice.index == 1) github_login();
+            continue;
+        }
         switch (choice.index) {
             case 1: screen_projects(); break;
             case 2: screen_labels(); break;
             case 3: screen_assignees(); break;
-            case 4: gh_user[0] ? github_logout() : github_login(); break;
-            case 5: github_repos(); break;
+            case 4: github_logout(); break;
             default: break;
         }
     }

@@ -1,6 +1,7 @@
 #include "db.h"
 #include "render.h"
 #include "ui/menu.h"
+#include "dotenv.h"
 #include <curl/curl.h>
 #include <locale.h>
 #include <stdio.h>
@@ -9,8 +10,19 @@
 /* Entry point for the terminal app. There is no socket and no fork. We open the
    single SQLite database, seed the default labels, and hand control to the menu
    loop. The database path comes from DB_PATH so tests and graders can point at a
-   scratch file without editing code. */
+   scratch file without editing code.
+
+   Standalone build: unlike the tetrish-integrated version, this one never
+   checks for a live tetrisd -- it runs on its own, with no dependency on
+   any other server being up. */
 int main(void) {
+    /* Load .env (or $ENV_FILE) first, before anything else calls getenv():
+       fills in GH_CLIENT_ID, DB_PATH, etc. from a file so they don't need
+       to be exported by hand. Real exported env vars still win over
+       whatever the file says. */
+    const char *env_file = getenv("ENV_FILE");
+    dotenv_load(env_file && env_file[0] ? env_file : ".env");
+
     /* A C program starts in the "C" locale no matter what LANG says, and in
        that locale nothing multibyte decodes. Without this the box and meter
        glyphs would measure as three columns each and every rule would come

@@ -10,7 +10,10 @@ endif
 
 # Application sources: entry point and service/util modules, plus everything
 # under src/core (business logic) and src/ui (screens).
+# Standalone build: no corestack/tetrish_gate here -- this version starts
+# on its own and never checks for a live tetrisd.
 SRC := src/main.c src/util.c src/db.c src/json.c src/token_store.c src/github.c src/render.c src/assets.c \
+       src/dotenv.c \
        $(wildcard src/core/*.c) $(wildcard src/ui/*.c)
 OBJ := $(SRC:.c=.o)
 BIN := mini-gh-tracker
@@ -20,17 +23,34 @@ BIN := mini-gh-tracker
 UNITY_SRC   := tests/vendor/unity/unity.c
 TEST_CFLAGS := $(CFLAGS) -Itests/vendor/unity
 
+# Tests belonging to the corestack half of the project (tetriSH), kept here
+# for reference but not buildable from this tree: test_ring/stress_ring need
+# src/tetrisd/ring.c and stub_client needs libtetrissh and libhtttp, none of
+# which live in this repo. They build and pass in the corestack project,
+# whose Makefile has rules for them. Excluded by name rather than by moving
+# the files, so the copies stay where whoever committed them expects.
+CORESTACK_TESTS := tests/test_ring.c
+
 # One test binary per module. Each links the module under test plus its deps.
-TEST_BINS := $(patsubst tests/%.c,build/%,$(wildcard tests/test_*.c))
-TEST_OBJS := $(patsubst tests/%.c,build/tests/%.o,$(wildcard tests/test_*.c))
+TEST_SRC  := $(filter-out $(CORESTACK_TESTS),$(wildcard tests/test_*.c))
+TEST_BINS := $(patsubst tests/%.c,build/%,$(TEST_SRC))
+TEST_OBJS := $(patsubst tests/%.c,build/tests/%.o,$(TEST_SRC))
 
 # Sources every test binary links against, besides its own tests/test_*.o.
 COMMON_TEST_SRC := $(UNITY_SRC) src/util.c src/db.c src/json.c src/token_store.c src/github.c src/render.c src/assets.c \
                     $(wildcard src/core/*.c) $(wildcard src/ui/*.c)
 COMMON_TEST_OBJ := $(addprefix build/,$(COMMON_TEST_SRC:.c=.o))
 
-.PHONY: all clean test e2e check
+.PHONY: all clean test e2e check run
 all: $(BIN)
+
+# `make run`: builds quietly (a sub-make with -s, so no "cc -Wall ..." lines)
+# and execs the binary, so all you see is mini-gh-tracker's own output --
+# the menu, not the build log. Plain `make` still prints compile commands
+# as usual.
+run:
+	@$(MAKE) --no-print-directory -s $(BIN)
+	@./$(BIN)
 
 $(BIN): $(OBJ)
 	$(CC) $(OBJ) -o $@ $(LDFLAGS)

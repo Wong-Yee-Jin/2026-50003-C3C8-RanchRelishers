@@ -144,15 +144,39 @@ static bool object_field(const char *p, const char *key, char *out, size_t outle
     }
 }
 
+/* Like object_field, but hands back a pointer to the start of key's raw
+   value (still exactly as it appears in the input) instead of copying it,
+   so a caller can recurse into a nested array without knowing its size up
+   front. Returns NULL when the key is absent or the input is not an
+   object. */
+static const char *object_field_raw(const char *p, const char *key) {
+    p = skip_ws(p);
+    if (*p != '{') return NULL;
+    p++;
+    for (;;) {
+        p = skip_ws(p);
+        if (*p != '"') return NULL;
+        char name[128];
+        const char *after = copy_string(p, name, sizeof(name));
+        if (!after) return NULL;
+        p = skip_ws(after);
+        if (*p != ':') return NULL;
+        p = skip_ws(p + 1);
+        if (strcmp(name, key) == 0) return p;
+        const char *end = skip_value(p);
+        if (!end) return NULL;
+        p = skip_ws(end);
+        if (*p == ',') { p++; continue; }
+        return NULL;
+    }
+}
+
 /* Public entry point. Reject null or zero-length arguments up front, then hand
    off to the object scanner for the real work. */
 bool json_field(const char *body, const char *key, char *out, size_t outlen) {
     if (!body || !key || !out || outlen == 0) return false;
     return object_field(body, key, out, outlen);
 }
-
-/* Read a field as a long, falling back to dflt when it is absent or does not
-   parse. The endp check catches a field that is empty or starts non-numeric. */
 long json_field_int(const char *body, const char *key, long dflt) {
     char buf[64];
     if (!json_field(body, key, buf, sizeof(buf))) return dflt;
@@ -162,12 +186,13 @@ long json_field_int(const char *body, const char *key, long dflt) {
     return v;
 }
 
-/* Walk a top-level array and copy one field from each object element into the
-   next out row. A non-object element or one missing the field is skipped rather
-   than treated as an error, so one odd entry does not abort the whole scan. */
-int json_array_objects(const char *body, const char *field, char out[][128], int max) {
-    if (!body || !field || !out || max <= 0) return 0;
-    const char *p = skip_ws(body);
+/* Shared array walk used by both json_array_objects and
+   json_array_field_objects: p may point anywhere before the opening '[',
+   whitespace included, or be NULL (a missing array is just zero results,
+   not an error). */
+static int walk_array(const char *p, const char *field, char out[][128], int max) {
+    if (!p) return 0;
+    p = skip_ws(p);
     if (*p != '[') return 0;
     p++;
     int count = 0;
@@ -182,4 +207,22 @@ int json_array_objects(const char *body, const char *field, char out[][128], int
         break;
     }
     return count;
+}
+
+/* Walk a top-level array and copy one field from each object element into the
+   next out row. A non-object element or one missing the field is skipped rather
+   than treated as an error, so one odd entry does not abort the whole scan. */
+int json_array_objects(const char *body, const char *field, char out[][128], int max) {
+    if (!body || !field || !out || max <= 0) return 0;
+    return walk_array(body, field, out, max);
+}
+
+/* Same as json_array_objects, but the array lives nested one level down,
+   under array_key at the top of body -- e.g. GitHub's
+   {"total_count":N,"items":[...]} search responses, where the results we
+   want are items[].field rather than a bare top-level array. */
+int json_array_field_objects(const char *body, const char *array_key,
+                              const char *field, char out[][128], int max) {
+    if (!body || !array_key || !field || !out || max <= 0) return 0;
+    return walk_array(object_field_raw(body, array_key), field, out, max);
 }

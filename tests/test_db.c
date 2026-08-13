@@ -243,20 +243,6 @@ static void test_view_issue_filters_by_status_within_the_project(void) {
     free(f);
 }
 
-static void test_view_issue_lists_comments_oldest_first(void) {
-    project_t p;
-    issue_t i1;
-    TEST_ASSERT_TRUE(db_project_create("Backend", &p));
-    TEST_ASSERT_TRUE(db_issue_create(p.id, "Login broken", "steps...", &i1));
-    TEST_ASSERT_TRUE(db_comment_add(i1.id, "first note"));
-    TEST_ASSERT_TRUE(db_comment_add(i1.id, "second note"));
-    comment_t *cl = NULL;
-    int cn = db_comment_list_by_issue(i1.id, &cl);
-    TEST_ASSERT_EQUAL_INT(2, cn);
-    TEST_ASSERT_EQUAL_STRING("first note", cl[0].text);   // ordered by created_at ascending
-    free(cl);
-}
-
 /* ---- Use case: Search Issue ---- */
 
 static void test_search_issue_is_scoped_to_project(void) {
@@ -308,7 +294,6 @@ int main(void) {
     RUN_TEST(test_assign_user_to_issue_records_the_assignee);
     RUN_TEST(test_view_issue_lists_the_issues_in_a_project);
     RUN_TEST(test_view_issue_filters_by_status_within_the_project);
-    RUN_TEST(test_view_issue_lists_comments_oldest_first);
     RUN_TEST(test_search_issue_is_scoped_to_project);
     RUN_TEST(test_search_issue_treats_percent_as_a_literal);
     RUN_TEST(test_search_issue_with_a_null_keyword_returns_the_project);

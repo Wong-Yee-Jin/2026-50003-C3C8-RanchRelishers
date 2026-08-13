@@ -103,4 +103,12 @@ int github_parse_repo_names(const char *body, char names[][128], int max);
 int github_list_repos(const char *token, char names[][128], int max,
                       gh_tick_fn tick, void *tick_ctx);
 
+/* GET /search/users?q=... (unauthenticated -- no token needed or used) and
+   copy up to max matching logins into out. Backs the "suggest real GitHub
+   usernames as you add a contributor" flow: called once the person has
+   typed a query and pressed enter, mirroring the web app's autocomplete
+   but without needing a live keystroke-by-keystroke connection. Returns -1
+   on an HTTP failure so the caller can tell "GitHub unreachable" apart
+   from "zero accounts matched", and 0 for an empty query. */
+int github_search_usernames(const char *query, char logins[][128], int max);
 #endif

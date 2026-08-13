@@ -36,11 +36,6 @@ int  db_issue_list_by_project(const char *project_id, issue_t **out_list);
 int  db_issue_search(const char *project_id, const char *keyword, int limit, issue_t **out_list);
 int  db_issue_filter(const char *project_id, const char *status_filter, const char *label_id_filter, int limit, issue_t **out_list);
 
-/* ---- Comments ---- */
-/* Free-text notes on an issue, listed in the order they were added. */
-bool db_comment_add(const char *issue_id, const char *text);
-int  db_comment_list_by_issue(const char *issue_id, comment_t **out_list);
-
 /* ---- Label Management ---- */
 /* Labels are shared tags. seed installs the default bug/feature/question set on
    an empty table. */
