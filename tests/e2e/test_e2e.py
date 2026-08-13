@@ -165,19 +165,23 @@ class E2ETests(AppTestCase):
         result = self.run_app(f"1\n1\n1\na\n{picked.group(1)}\n0\n0\n0\n0\n")
         self.assertIn("assignees: alice", result.stdout)
 
-    # ---- Known defect: filter-by-label wants a raw 24-char hex label id, ----
-    # ---- typed by hand, instead of the name shown anywhere in the UI.    ----
-    # src/ui/menu.c:250-251 sends whatever the user types straight through as
-    # the label id; typing the human-readable name ("bug") never matches, so
-    # filtering by label is effectively unusable from the menu. Left as a
-    # documented expected failure instead of weakening the assertion.
-    @unittest.expectedFailure
-    def test_filter_by_label_name_is_broken(self):
-        script = "1\nc\nProjA\n1\nc\nBugIssue\ndesc\n1\nl\n1\n0\nf\n\nbug\n0\n0\n0\n"
+    # ---- Filter by label ----
+    # The filter used to ask for a raw 24-character hex label id, which is not
+    # shown anywhere in the UI, so typing the name everyone can see never
+    # matched and filtering by label was unusable from the menu. It now offers
+    # the same numbered picker the add-label flow does.
+    def test_filter_by_label_picks_from_the_numbered_list(self):
+        # Two issues, one labelled "bug" and one not, so the assertion catches
+        # a filter that quietly returns everything as well as one that returns
+        # nothing. Label 1 is "bug" from the seeded defaults.
+        script = ("1\nc\nProjA\n1\nc\nBugIssue\ndesc\nc\nPlainIssue\ndesc\n"
+                   "1\nl\n1\n0\nf\n\n1\n0\n0\n0\n")
         result = self.run_app(script)
+        self.assertIn("label # (blank for any):", result.stdout)
         marker = "-- filtered issues --"
         filtered_block = result.stdout.split(marker, 1)[1].split("[ gh-tracker ]", 1)[0]
         self.assertIn("BugIssue", filtered_block)
+        self.assertNotIn("PlainIssue", filtered_block)
 
 
 if __name__ == "__main__":
