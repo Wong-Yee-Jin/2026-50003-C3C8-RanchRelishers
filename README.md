@@ -38,14 +38,17 @@ The menu lets you create and browse projects, issues, labels, users, and comment
 
 ### Terminal presentation
 
-Color depth is detected automatically: `COLORTERM=truecolor` or `24bit` gives full color, a `TERM` containing `256color` gives 256 colors, anything else falls back to 16 colors. `NO_COLOR` (any non-empty value) disables color outright regardless of what the terminal reports.
+Color depth is detected automatically: `COLORTERM=truecolor` or `24bit` gives full color, a `TERM` containing `256color` gives 256 colors, anything else falls back to 16 colors. `NO_COLOR` (any non-empty value) disables color outright regardless of what the terminal reports. The palette itself adapts to a light or dark background based on `COLORFGBG`, since the default colors are picked for a dark terminal and read as washed out on a white one.
 
-The app switches to the terminal's alternate screen on start and restores your original screen on exit, including on Ctrl-C. Borders and meters use box-drawing and block characters when the locale is UTF-8, and fall back to plain ASCII otherwise.
+The app switches to the terminal's alternate screen on start and restores your original screen on exit, including on Ctrl-C. Every screen draws as a closed box: title rule, sided body, bottom rule, using box-drawing and block characters when the locale is UTF-8 and plain ASCII otherwise. A row too wide for the box, like a long issue title, is cut short with a trailing ellipsis rather than wrapping or breaking the border.
 
-None of this shows up when the program is not attached to a terminal: piped or scripted runs, including the e2e suite and any shell script, get plain undecorated text with no escape codes at all, so their output stays stable.
+On a real terminal the screens are navigated rather than typed at. A caret marks the current row: `↑`/`↓` or `k`/`j` move it, Enter opens what it points at, and Esc, `q` or `0` go back one screen (at the main menu they quit). The number and letter keys each screen lists still work as direct shortcuts, so typing `c` creates without going near the arrow keys. Each screen repaints in place on every keypress and carries a one-line status under its title saying what the last action did. Prompts that ask you to type something, like a project name, switch back to ordinary line editing with the cursor showing, and answering one with a blank line cancels it.
+
+None of this shows up when the program is not attached to a terminal: piped or scripted runs, including the e2e suite and any shell script, get the same line-based menu they always have, as plain undecorated text with no escape codes at all, so their output stays stable.
 
 ### Environment variables
 
+- `COLORFGBG` - the terminal's foreground/background colors, as some terminal emulators set it (e.g. `15;0`). Only the last `;`-separated field (the background) is read, to pick between the dark and light color palettes; unset or unparsable reads as dark.
 - `DB_PATH` - path to the SQLite database file. Defaults to `issues.db`.
 - `GH_CLIENT_ID` - OAuth app client id for GitHub's device flow. Required to use menu item 4 (GitHub login); without it, login fails immediately and the tracker stays on the local identity.
 - `GH_SCOPE` - OAuth scope requested during login. Defaults to `read:user`.
