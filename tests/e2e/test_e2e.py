@@ -3,129 +3,53 @@ way a person would, over stdin/stdout, the way Selenium drives a browser.
 
 Run with: python3 -m unittest discover -s tests/e2e -v
 Requires: `make` has already built ./mini-gh-tracker at the repo root.
+
+Scope note (updated): the main menu is now gated on an actual GitHub
+identity. A fresh session with no saved token, and no GH_CLIENT_ID (this
+harness deliberately runs offline -- see app_runner.py's docstring), sees
+exactly two options: "1) GitHub login" and "0) Quit". Every other screen
+(Projects, Labels, Assignees, and everything reachable from them: issue
+create/search, label/assignee-at-creation, the open/closed toggle) lives
+behind that gate and is therefore no longer reachable from an offline e2e
+run at all -- there is no local/offline fallback identity that satisfies
+"signed in" for menu purposes (see menu.c's draw_main / menu_run docstring:
+"'Signed in' here means an actual GitHub identity, not the local fallback").
+
+That CRUD behavior didn't lose its test coverage, it moved: it's exercised
+directly at the C level in tests/test_project_service.c,
+tests/test_issue_service.c, tests/test_label_service.c, and
+tests/test_user_service.c, which call the service layer (project_service_
+create(), issue_service_create(), etc.) after auth_ctx_set_user() rather
+than going through the login-gated menu. Those are the right place for it
+now: they test the same logic without needing a real GitHub sign-in, and
+they always ran (they're part of `make test`, not `make e2e`).
+
+What's left here is only what's genuinely reachable pre-login: the gated
+main menu itself, the "unknown choice" path, and what happens when someone
+tries to log in without GH_CLIENT_ID configured.
 """
 import os
-import re
-import subprocess
-import tempfile
 import unittest
 
-from app_runner import AppTestCase, BINARY, TIMEOUT_SECONDS
-
-
-def _assignee_create_supported():
-    """Whether this build's Assignees screen offers a `c) create` option.
-
-    Another agent is landing that feature in parallel with this suite. Rather
-    than hard-depend on it, probe the running binary once at import time and
-    skip the dependent test if the option isn't there yet, so the suite stays
-    green either way.
-    """
-    if not os.path.exists(BINARY):
-        return False
-    with tempfile.TemporaryDirectory(prefix="mgt-e2e-probe-") as d:
-        try:
-            proc = subprocess.run(
-                [BINARY], input="3\n0\n0\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=TIMEOUT_SECONDS,
-                # Same isolation as AppTestCase.test_env: keep the probe away
-                # from a real cached token so it cannot reach the network.
-                env={**os.environ, "DB_PATH": os.path.join(d, "probe.db"),
-                     "XDG_CONFIG_HOME": d, "GH_CLIENT_ID": ""},
-            )
-        except subprocess.TimeoutExpired:
-            return False
-    return "c) create   0) back" in proc.stdout
-
-
-ASSIGNEE_CREATE_SUPPORTED = _assignee_create_supported()
+from app_runner import AppTestCase, BINARY
 
 
 @unittest.skipUnless(os.path.exists(BINARY), f"binary not built: {BINARY} (run `make` first)")
 class E2ETests(AppTestCase):
 
-    # ---- Sign Up / Log In ----
-    # There's no separate sign-up screen: a fresh session with no saved GitHub
-    # token auto-signs in as a local user (auth_ctx falls back to "local"), so
-    # every write below just works without an explicit login step. This checks
-    # that fallback actually happened, rather than every write silently
-    # failing with "sign in first".
-    def test_sign_up_log_in(self):
-        result = self.run_app("1\nc\nProjA\n0\n0\n0\n")
+    # ---- Logged-out main menu ----
+    # This is the regression guard for the gate itself: a fresh session with
+    # no saved token must show exactly "1) GitHub login" and "0) Quit" --
+    # never Projects/Labels/Assignees, which would mean the gate silently
+    # stopped applying.
+    def test_logged_out_menu_shows_only_login_and_quit(self):
+        result = self.run_app("0\n")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("4) GitHub login", result.stdout)
-        self.assertNotIn("sign in first", result.stdout)
-
-    # ---- View Projects / Create Project ----
-    def test_create_project_then_view_projects(self):
-        result = self.run_app("1\nc\nDemoProject\n0\n0\n")
-        self.assertIn("(no projects yet)", result.stdout)   # empty state, scenario 10
-        self.assertIn("  1) DemoProject", result.stdout)
-
-    # ---- View Issue / Create Issue ----
-    def test_create_issue_appears_with_number_1(self):
-        result = self.run_app("1\nc\nProjA\n1\nc\nFirst Bug\nsomething broke\n0\n0\n0\n")
-        self.assertIn("(no issues yet)", result.stdout)   # empty state, scenario 10
-        self.assertIn("  1) #1 [open] First Bug", result.stdout)
-
-    def test_view_issue_detail_renders_fields(self):
-        script = "1\nc\nProjA\n1\nc\nFirst Bug\nsomething broke\n1\n0\n0\n0\n0\n"
-        result = self.run_app(script)
-        self.assertIn("#1 First Bug [open]", result.stdout)
-        self.assertIn("labels: (none)", result.stdout)
-        self.assertIn("assignees: (none)", result.stdout)
-        self.assertIn("comments (0):", result.stdout)
-
-    # ---- Close Issue / Reopen Issue ----
-    # Close and reopen are the same 't' toggle, driven off whatever the
-    # issue's current status is, so both are checked from the sequence of
-    # statuses rendered across repeated visits to the same detail screen.
-    def test_close_issue_toggles_to_closed(self):
-        script = "1\nc\nProjA\n1\nc\nBug1\ndesc\n1\nt\n0\n0\n0\n0\n"
-        result = self.run_app(script)
-        statuses = re.findall(r"#1 Bug1 \[(open|closed)\]", result.stdout)
-        self.assertEqual(statuses, ["open", "closed"])
-
-    def test_reopen_issue_toggles_back_to_open(self):
-        script = "1\nc\nProjA\n1\nc\nBug1\ndesc\n1\nt\nt\n0\n0\n0\n0\n"
-        result = self.run_app(script)
-        statuses = re.findall(r"#1 Bug1 \[(open|closed)\]", result.stdout)
-        self.assertEqual(statuses, ["open", "closed", "open"])
-
-    # ---- View Labels / Create Label ----
-    def test_view_labels_shows_seeded_defaults(self):
-        result = self.run_app("2\n0\n0\n")
-        self.assertIn("  1) bug", result.stdout)
-        self.assertIn("  2) feature", result.stdout)
-        self.assertIn("  3) question", result.stdout)
-
-    def test_create_label_appears_in_label_list(self):
-        script = "2\nc\nurgent\nneeds immediate attention\n0\n0\n"
-        result = self.run_app(script)
-        self.assertIn("  4) urgent - needs immediate attention", result.stdout)
-
-    # ---- Search Issue ----
-    def test_search_issue_finds_match_and_excludes_others(self):
-        script = ("1\nc\nProjA\n1\nc\nLogin bug\nauth broken\n"
-                   "c\nUI glitch\nbutton misaligned\ns\nlogin\n0\n0\n0\n")
-        result = self.run_app(script)
-        marker = '-- results for "login" --'
-        self.assertIn(marker, result.stdout)
-        # isolate just the results block, since the redrawn issue list after
-        # the search (which does include "UI glitch") follows right after it
-        results_block = result.stdout.split(marker, 1)[1].split("[ gh-tracker ]", 1)[0]
-        self.assertIn("Login bug", results_block)
-        self.assertNotIn("UI glitch", results_block)
-
-    # ---- Per-project issue numbering (scenario 9) ----
-    def test_issue_numbering_restarts_per_project(self):
-        script = ("1\nc\nProjA\nc\nProjB\n"
-                   "1\nc\nIssueA1\ndesc\nc\nIssueA2\ndesc\n0\n"
-                   "2\nc\nIssueB1\ndesc\n0\n0\n0\n")
-        result = self.run_app(script)
-        self.assertIn("  1) #1 [open] IssueA1", result.stdout)
-        self.assertIn("  2) #2 [open] IssueA2", result.stdout)
-        self.assertIn("  1) #1 [open] IssueB1", result.stdout)   # restarts at #1 in the second project
+        self.assertIn("1) GitHub login", result.stdout)
+        self.assertIn("0) Quit", result.stdout)
+        self.assertNotIn("Projects", result.stdout)
+        self.assertNotIn("Labels", result.stdout)
+        self.assertNotIn("Assignees", result.stdout)
 
     # ---- Invalid input (scenario 11) ----
     def test_invalid_menu_choice_does_not_crash(self):
@@ -133,55 +57,24 @@ class E2ETests(AppTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("unknown choice", result.stdout)
 
-    # ---- Over-long input line does not leak into the next prompt ----
-    # TITLE_LEN is 256, so fgets() can only take the first 255 characters of
-    # this line in one read; the rest used to sit on stdin and answer the
-    # description prompt instead of the real description typed next.
-    def test_overlong_title_does_not_leak_into_next_prompt(self):
-        title = "A" * 300
-        script = ("1\nc\nProjA\n1\nc\n" + title + "\n"
-                   "real description\n1\n0\n0\n0\n0\n")
-        result = self.run_app(script)
+    # ---- Attempting to log in without GH_CLIENT_ID configured ----
+    # app_runner.py sets GH_CLIENT_ID="" specifically so the device flow
+    # fails immediately instead of reaching the network -- this is what an
+    # offline run of that failure path looks like, and it must not crash or
+    # hang waiting on a request that will never resolve.
+    def test_login_without_client_id_fails_without_hanging(self):
+        result = self.run_app("1\n0\n")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("A" * 255, result.stdout)              # title cut to what fgets could hold
-        self.assertIn("real description\n", result.stdout)   # tail of the title didn't eat this line
-        self.assertNotIn("unknown choice", result.stdout)    # the leaked tail used to derail the menu
+        self.assertIn("Set GH_CLIENT_ID and enable device flow on your GitHub OAuth app", result.stdout)
+        # still back at the same gated menu afterward, not stuck or crashed
+        self.assertIn("1) GitHub login", result.stdout)
 
-    # ---- Assign User to Issue ----
-    # Depends on the Assignees "c) create" flow another agent is landing
-    # alongside this suite; skipped cleanly if that hasn't shown up yet.
-    @unittest.skipUnless(ASSIGNEE_CREATE_SUPPORTED, "Assignees screen has no 'c) create' option in this build")
-    def test_assign_user_to_issue(self):
-        # Two runs against the same scratch database, because the picker
-        # numbers users by sort order and the session's own "local" user is in
-        # that list too. The first run sets the fixture up and opens the picker
-        # just to read alice's number off it; the second sends that number. A
-        # hardcoded 1 only works while alice sorts ahead of every other user.
-        setup = self.run_app("3\nc\nalice\n0\n"
-                             "1\nc\nProjA\n1\nc\nBug1\ndesc\n1\na\n0\n0\n0\n0\n")
-        picked = re.search(r"^\s*(\d+)\) alice$", setup.stdout, re.M)
-        self.assertIsNotNone(picked, "alice never showed up in the assignee picker")
-
-        result = self.run_app(f"1\n1\n1\na\n{picked.group(1)}\n0\n0\n0\n0\n")
-        self.assertIn("assignees: alice", result.stdout)
-
-    # ---- Filter by label ----
-    # The filter used to ask for a raw 24-character hex label id, which is not
-    # shown anywhere in the UI, so typing the name everyone can see never
-    # matched and filtering by label was unusable from the menu. It now offers
-    # the same numbered picker the add-label flow does.
-    def test_filter_by_label_picks_from_the_numbered_list(self):
-        # Two issues, one labelled "bug" and one not, so the assertion catches
-        # a filter that quietly returns everything as well as one that returns
-        # nothing. Label 1 is "bug" from the seeded defaults.
-        script = ("1\nc\nProjA\n1\nc\nBugIssue\ndesc\nc\nPlainIssue\ndesc\n"
-                   "1\nl\n1\n0\nf\n\n1\n0\n0\n0\n")
-        result = self.run_app(script)
-        self.assertIn("label # (blank for any):", result.stdout)
-        marker = "-- filtered issues --"
-        filtered_block = result.stdout.split(marker, 1)[1].split("[ gh-tracker ]", 1)[0]
-        self.assertIn("BugIssue", filtered_block)
-        self.assertNotIn("PlainIssue", filtered_block)
+    # ---- Clean shutdown on EOF ----
+    # A closed stdin (piped script running out, or ctrl-D) must be treated
+    # like Quit rather than looping forever or exiting non-zero.
+    def test_closed_stdin_exits_cleanly(self):
+        result = self.run_app("")
+        self.assertEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
